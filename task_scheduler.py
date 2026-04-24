@@ -25,6 +25,18 @@ class TaskScheduler:
                 exc_info=exc,
             )
 
+    @classmethod
+    def create_detached_task(
+        cls,
+        coro: Coroutine[Any, Any, Any],
+        *,
+        name: str = "",
+    ) -> asyncio.Task[Any]:
+        """创建不纳入调度表的后台任务，并复用统一异常日志。"""
+        task = asyncio.create_task(coro, name=name or None)
+        task.add_done_callback(cls._task_done_callback)
+        return task
+
     def create_task(
         self, name: str, coro: Coroutine[Any, Any, Any], replace_existing: bool = True
     ) -> asyncio.Task[Any] | None:
@@ -47,8 +59,7 @@ class TaskScheduler:
                 return None
 
         try:
-            task = asyncio.create_task(coro, name=name)
-            task.add_done_callback(self._task_done_callback)
+            task = self.create_detached_task(coro, name=name)
             self._tasks[name] = task
             logger.info(f"创建任务: {name}")
             return task

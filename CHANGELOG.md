@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.7] - 2026-04-25
+### add
+- 新增黑白名单优先级机制：白名单和黑名单可同时启用，通过 `/meme group <send|steal> priority <wl|bl>` 或 WebUI 配置切换冲突时的优先级
+- 表情包发送路径优化：Telegram 贴纸 → file_image → base64 三级自动选择，非 QQ 平台优先使用 file_image 降低发送开销
+
+### improved
+- 图片下载和 WebUI 上传流程去重重构，减少重复代码
+- 目标名单检查增强：同时提取群组和用户目标，支持黑白名单同时生效并处理冲突
+
 ## [2.5.6] - 2026-04-19
 ### fix
 - 修复 `rebuild_index` 元数据恢复稳定性：按路径/哈希/文件名多级匹配并补充大小写无关 stem 回退，减少标签与描述丢失

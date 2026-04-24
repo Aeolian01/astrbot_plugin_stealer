@@ -99,6 +99,71 @@ class EventHandler:
         platform_name = self._get_event_platform_name(event)
         return platform_name == "telegram"
 
+    def _build_download_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        napcat_token = getattr(self.plugin, "napcat_token", "")
+        if napcat_token:
+            headers["Authorization"] = f"Bearer {napcat_token}"
+        return headers
+
+    @staticmethod
+    def _detect_download_file_type(
+        content_type: str, content: bytes
+    ) -> tuple[str, bool]:
+        content_type = str(content_type or "").lower()
+        is_gif = "gif" in content_type or content[:6] in (b"GIF89a", b"GIF87a")
+        if is_gif:
+            return ".gif", True
+        if "png" in content_type or content[:8] == b"\x89PNG\r\n\x1a\n":
+            return ".png", False
+        if "webp" in content_type or (
+            content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+        ):
+            return ".webp", False
+        if "jpeg" in content_type or "jpg" in content_type:
+            return ".jpg", False
+        return ".jpg", False
+
+    async def _download_to_temp(
+        self, url: str, *, log_download: bool = False
+    ) -> tuple[str | None, bool]:
+        url = self._normalize_str(url)
+        if not url:
+            return None, False
+
+        try:
+            session = await self._get_aiohttp_session()
+            async with session.get(
+                url,
+                headers=self._build_download_headers(),
+                timeout=aiohttp.ClientTimeout(total=self.HTTP_TIMEOUT_SECONDS),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"下载图片失败: HTTP {resp.status}")
+                    return None, False
+
+                content_type = resp.headers.get("Content-Type", "").lower()
+                content = await resp.read()
+                ext, is_gif = self._detect_download_file_type(content_type, content)
+
+                temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
+                try:
+                    os.write(temp_fd, content)
+                    if log_download:
+                        logger.debug(
+                            f"已下载原始图片: {temp_path} ({len(content)} bytes, "
+                            f"type={content_type}, is_gif={is_gif})"
+                        )
+                    return temp_path, is_gif
+                finally:
+                    os.close(temp_fd)
+        except asyncio.TimeoutError:
+            logger.warning("下载图片超时")
+            return None, False
+        except Exception as e:
+            logger.warning(f"下载图片失败: {e}")
+            return None, False
+
     async def _download_original_image(self, img: Image) -> tuple[str | None, bool]:
         """下载原始图片文件。
 
@@ -108,117 +173,11 @@ class EventHandler:
         Returns:
             tuple[str | None, bool]: (临时文件路径, 是否为GIF动图)，失败返回 (None, False)
         """
-        url = self._normalize_str(getattr(img, "url", ""))
-        if not url:
-            return None, False
-
-        # 准备请求头，如果配置了 NapCat token 则添加认证
-        # 优先使用 plugin.napcat_token（已自动从适配器配置加载）
-        headers = {}
-        napcat_token = getattr(self.plugin, "napcat_token", "")
-        if napcat_token:
-            headers["Authorization"] = f"Bearer {napcat_token}"
-
-        try:
-            session = await self._get_aiohttp_session()
-            async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"下载图片失败: HTTP {resp.status}")
-                        return None, False
-
-                    content_type = resp.headers.get("Content-Type", "").lower()
-                    content = await resp.read()
-
-                    # 根据 Content-Type 确定扩展名和是否为 GIF
-                    is_gif = "gif" in content_type
-                    if is_gif:
-                        ext = ".gif"
-                    elif "png" in content_type:
-                        ext = ".png"
-                    elif "webp" in content_type:
-                        ext = ".webp"
-                    elif "jpeg" in content_type or "jpg" in content_type:
-                        ext = ".jpg"
-                    else:
-                        # 尝试从文件头判断
-                        if content[:6] == b"GIF89a" or content[:6] == b"GIF87a":
-                            ext = ".gif"
-                            is_gif = True
-                        elif content[:8] == b"\x89PNG\r\n\x1a\n":
-                            ext = ".png"
-                        elif content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-                            ext = ".webp"
-                        else:
-                            ext = ".jpg"
-
-                    # 保存到临时文件
-                    temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
-                    try:
-                        os.write(temp_fd, content)
-                        logger.debug(
-                            f"已下载原始图片: {temp_path} ({len(content)} bytes, "
-                            f"type={content_type}, is_gif={is_gif})"
-                        )
-                        return temp_path, is_gif
-                    finally:
-                        os.close(temp_fd)
-
-        except asyncio.TimeoutError:
-            logger.warning("下载图片超时")
-            return None, False
-        except Exception as e:
-            logger.warning(f"下载图片失败: {e}")
-            return None, False
+        return await self._download_to_temp(getattr(img, "url", ""), log_download=True)
 
     async def _download_url_to_temp(self, url: str) -> tuple[str | None, bool]:
         """从 URL 下载文件到临时文件，返回 (temp_path, is_gif)。"""
-        url = self._normalize_str(url)
-        if not url:
-            return None, False
-
-        headers = {}
-        napcat_token = getattr(self.plugin, "napcat_token", "")
-        if napcat_token:
-            headers["Authorization"] = f"Bearer {napcat_token}"
-
-        try:
-            session = await self._get_aiohttp_session()
-            async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"下载图片失败: HTTP {resp.status}")
-                        return None, False
-
-                    content_type = resp.headers.get("Content-Type", "").lower()
-                    content = await resp.read()
-
-                    is_gif = "gif" in content_type or content[:6] in (b"GIF89a", b"GIF87a")
-                    if is_gif:
-                        ext = ".gif"
-                    elif "png" in content_type or content[:8] == b"\x89PNG\r\n\x1a\n":
-                        ext = ".png"
-                    elif "webp" in content_type or (content[:4] == b"RIFF" and content[8:12] == b"WEBP"):
-                        ext = ".webp"
-                    elif "jpeg" in content_type or "jpg" in content_type:
-                        ext = ".jpg"
-                    else:
-                        ext = ".jpg"
-
-                    temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
-                    try:
-                        os.write(temp_fd, content)
-                        return temp_path, is_gif
-                    finally:
-                        os.close(temp_fd)
-        except asyncio.TimeoutError:
-            logger.warning("下载图片超时")
-            return None, False
-        except Exception as e:
-            logger.warning(f"下载图片失败: {e}")
-            return None, False
+        return await self._download_to_temp(url)
 
     def _extract_store_emoji_urls(self, event: AstrMessageEvent) -> list[str]:
         """从 OneBot raw_message 里提取 QQ 商城表情（marketface/mface）的可下载 URL。"""

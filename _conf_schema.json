@@ -151,6 +151,16 @@
     "default": [],
     "hint": "格式：group:群号 或 user:QQ号。白名单为空时生效，黑名单目标不触发发表情"
   },
+  "send_target_filter_mode": {
+    "description": "发表情名单优先级",
+    "type": "string",
+    "default": "whitelist_first",
+    "options": [
+      "whitelist_first",
+      "blacklist_first"
+    ],
+    "hint": "允许白名单和黑名单同时生效。whitelist_first=白名单优先，blacklist_first=黑名单优先"
+  },
   "steal_target_whitelist": {
     "description": "偷表情白名单",
     "type": "list",
@@ -162,6 +172,16 @@
     "type": "list",
     "default": [],
     "hint": "格式：group:群号 或 user:QQ号。白名单为空时生效，黑名单目标不触发偷表情"
+  },
+  "steal_target_filter_mode": {
+    "description": "偷表情名单优先级",
+    "type": "string",
+    "default": "whitelist_first",
+    "options": [
+      "whitelist_first",
+      "blacklist_first"
+    ],
+    "hint": "允许白名单和黑名单同时生效。whitelist_first=白名单优先，blacklist_first=黑名单优先"
   },
   "_storage_section": {
     "description": "=== 存储管理 ===",

@@ -20,6 +20,7 @@ class WebServer:
     CLIENT_MAX_SIZE = 50 * 1024 * 1024  # 50MB 最大请求大小
     SESSION_CLEANUP_INTERVAL = 300  # Session 清理间隔（秒）
     SESSION_MAX_COUNT = 1000  # 最大 Session 数量
+    ALLOWED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
     def __init__(self, plugin: Any, host: str = "0.0.0.0", port: int = 9191):
         self.plugin = plugin
@@ -274,6 +275,55 @@ class WebServer:
             seen.add(text)
             scenes.append(text)
         return scenes
+
+    @classmethod
+    def _is_allowed_image_ext(cls, file_ext: str) -> bool:
+        return str(file_ext or "").lower() in cls.ALLOWED_IMAGE_EXTS
+
+    def _build_image_url(self, file_path: Path) -> str:
+        return f"/images/{file_path.relative_to(self.data_dir).as_posix()}"
+
+    async def _persist_uploaded_image(
+        self,
+        *,
+        file_content: bytes,
+        file_ext: str,
+        category: str,
+        file_hash: str | None = None,
+        tags: list[str] | None = None,
+        desc: str = "",
+        scenes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        final_category = str(category or "").strip() or "unknown"
+        timestamp = int(datetime.now().timestamp())
+        unique_filename = f"{timestamp}_{uuid.uuid4().hex[:8]}{file_ext}"
+        category_dir = self.plugin.plugin_config.ensure_category_dir(final_category)
+        file_path = category_dir / unique_filename
+        await asyncio.to_thread(file_path.write_bytes, file_content)
+
+        image_hash = file_hash or self.plugin.cache_service.compute_hash(file_content)
+        image_data = {
+            "hash": image_hash,
+            "path": str(file_path),
+            "category": final_category,
+            "tags": list(tags or []),
+            "desc": str(desc or ""),
+            "scenes": list(scenes or []),
+            "created_at": timestamp,
+        }
+        await self.plugin.cache_service.update_index(
+            lambda current: current.__setitem__(str(file_path), image_data)
+        )
+
+        return {
+            "hash": image_hash,
+            "url": self._build_image_url(file_path),
+            "category": final_category,
+            "tags": image_data["tags"],
+            "desc": image_data["desc"],
+            "scenes": image_data["scenes"],
+            "created_at": timestamp,
+        }
 
     async def _collect_removed_paths_by_hashes(
         self, hashes: set[str], *, raise_on_sync_error: bool = False
@@ -1315,58 +1365,24 @@ class WebServer:
             scenes = self._split_scene_terms(data.get("scene", ""))
 
             file_ext = Path(uploaded_file.filename).suffix.lower()
-            allowed_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-            if file_ext not in allowed_exts:
+            if not self._is_allowed_image_ext(file_ext):
                 return self._err(
-                    f"不支持的文件类型，允许: {', '.join(allowed_exts)}", 400
+                    f"不支持的文件类型，允许: {', '.join(self.ALLOWED_IMAGE_EXTS)}",
+                    400,
                 )
 
             file_content = await asyncio.to_thread(uploaded_file.file.read)
-            file_hash = self.plugin.cache_service.compute_hash(file_content)
-
-            timestamp = int(datetime.now().timestamp())
-            unique_filename = f"{timestamp}_{uuid.uuid4().hex[:8]}{file_ext}"
-
-            category_dir = self.plugin.plugin_config.ensure_category_dir(category)
-            file_path = category_dir / unique_filename
-
-            def _write_file():
-                with open(file_path, "wb") as f:
-                    f.write(file_content)
-
-            await asyncio.to_thread(_write_file)
-
-            await self.plugin.cache_service.update_index(
-                lambda current: current.__setitem__(
-                    str(file_path),
-                    {
-                        "hash": file_hash,
-                        "path": str(file_path),
-                        "category": category,
-                        "tags": tags,
-                        "desc": desc,
-                        "scenes": scenes,
-                        "created_at": timestamp,
-                    },
-                )
+            image = await self._persist_uploaded_image(
+                file_content=file_content,
+                file_ext=file_ext,
+                category=category,
+                tags=tags,
+                desc=desc,
+                scenes=scenes,
             )
             # 同步到数据库
             await self._sync_index_to_db(raise_on_error=True)
-            url = f"/images/{file_path.relative_to(self.data_dir).as_posix()}"
-
-            return self._ok(
-                {
-                    "image": {
-                        "hash": file_hash,
-                        "url": url,
-                        "category": category,
-                        "tags": tags,
-                        "desc": desc,
-                        "scenes": scenes,
-                        "created_at": timestamp,
-                    },
-                }
-            )
+            return self._ok({"image": image})
 
         except Exception as e:
             logger.error(f"上传图片失败: {e}", exc_info=True)
@@ -1389,17 +1405,18 @@ class WebServer:
                     if not filename:
                         continue
                     file_ext = Path(filename).suffix.lower()
-                    allowed_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-                    if file_ext not in allowed_exts:
+                    if not self._is_allowed_image_ext(file_ext):
                         continue
                     content = await field.read()
                     if content:
-                        files_data.append({
-                            "filename": filename,
-                            "content": content,
-                            "hash": self.plugin.cache_service.compute_hash(content),
-                            "ext": file_ext,
-                        })
+                        files_data.append(
+                            {
+                                "filename": filename,
+                                "content": content,
+                                "hash": self.plugin.cache_service.compute_hash(content),
+                                "ext": file_ext,
+                            }
+                        )
                 elif field.name == "category":
                     category = (await field.text()).strip()
                 elif field.name == "auto_analyze":
@@ -1452,8 +1469,6 @@ class WebServer:
 
             async def process_one(file_data: dict) -> dict:
                 try:
-                    unique_filename = f"{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}{file_data['ext']}"
-
                     tags = []
                     desc = ""
                     scenes = []
@@ -1498,35 +1513,19 @@ class WebServer:
                             logger.warning(f"自动分析失败: {e}")
                             raise Exception(f"自动分析失败: {e}")
 
-                    final_category = str(final_category or "").strip() or "unknown"
-                    category_dir = self.plugin.plugin_config.ensure_category_dir(final_category)
-                    file_path = category_dir / unique_filename
-                    await asyncio.to_thread(
-                        lambda: open(file_path, "wb").write(file_data["content"])
+                    image = await self._persist_uploaded_image(
+                        file_content=file_data["content"],
+                        file_ext=file_data["ext"],
+                        category=final_category,
+                        file_hash=file_data["hash"],
+                        tags=tags,
+                        desc=desc,
+                        scenes=scenes,
                     )
-
-                    timestamp = int(datetime.now().timestamp())
-
-                    await self.plugin.cache_service.update_index(
-                        lambda current: current.__setitem__(
-                            str(file_path),
-                            {
-                                "hash": file_data["hash"],
-                                "path": str(file_path),
-                                "category": final_category,
-                                "tags": tags,
-                                "desc": desc,
-                                "scenes": scenes,
-                                "created_at": timestamp,
-                            },
-                        )
-                    )
-
-                    url = f"/images/{file_path.relative_to(self.data_dir).as_posix()}"
                     return {
-                        "hash": file_data["hash"],
-                        "url": url,
-                        "category": final_category,
+                        "hash": image["hash"],
+                        "url": image["url"],
+                        "category": image["category"],
                         "success": True,
                     }
                 except Exception as e:

@@ -10,7 +10,6 @@
 import asyncio
 import hashlib
 import json
-import os
 import sqlite3
 import time
 from contextlib import contextmanager

@@ -90,7 +90,7 @@
 
 **手动管理表情包 **
 
-1. 手动放入表情包到 `data/emoji_store/` 分类目录
+1. 手动放入表情包到 `plugin_data/astrbot_plugin_stealer/categories/` 下对应的分类目录
 2. 或使用 WebUI 批量上传并指定分类
 3. Bot 回复时仍会自动发送匹配的表情包（仅使用已有分类，不调用 VLM 分析）
 
@@ -148,8 +148,10 @@
 |:---|:---|:---|
 | **发表情白名单** | `[]` | 发表情白名单。使用 `group:群号` 或 `user:QQ号` |
 | **发表情黑名单** | `[]` | 发表情黑名单。白名单为空时生效 |
+| **发表情名单优先级** | `whitelist_first` | 白黑名单可同时设置；`whitelist_first`=白名单优先，`blacklist_first`=黑名单优先 |
 | **偷表情白名单** | `[]` | 偷表情白名单。使用 `group:群号` 或 `user:QQ号` |
 | **偷表情黑名单** | `[]` | 偷表情黑名单。白名单为空时生效 |
+| **偷表情名单优先级** | `whitelist_first` | 白黑名单可同时设置；`whitelist_first`=白名单优先，`blacklist_first`=黑名单优先 |
 
 ### 存储及进阶管理
 
@@ -201,7 +203,8 @@
 | `clean [force]` | 清理未分类的原始暂存图文件 |
 | `偷` | 进入 30 秒强制收录模式，期间发送的图片直接入库 |
 | `group show` | 查看当前偷表情/发表情名单配置 |
-| `group <send\|steal> <wl\|bl> <add\|del\|clear> [group:群号\|user:QQ号]` | 管理目标黑白名单策略 |
+| `group <send\|steal> priority <wl\|bl>` | 设置白黑名单冲突时的优先级 |
+| `group <send\|steal> <wl\|bl> <add\|del\|clear> [group:群号\|user:QQ号]` | 管理目标黑白名单策略，支持群和用户同时生效 |
 | `delete <序号\|文件名>` | 删除指定表情包 |
 | `blacklist <序号\|文件名>` | 删除指定表情包并加入黑名单，禁止再次收录 |
 | `scope <序号\|文件名> <public\|local>` | 设置表情包作用域，`local` 仅来源群可发送（用于作用域控制，可一定程度保护隐私） |

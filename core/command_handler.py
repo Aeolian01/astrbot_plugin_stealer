@@ -100,12 +100,14 @@ class CommandHandler:
                 "用法：\n"
                 "/meme group show\n"
                 "/meme group <send|steal> show\n"
+                "/meme group <send|steal> priority <wl|bl>\n"
                 "/meme group <send|steal> <wl|bl> <add|del|clear> [group:ID|user:QQ]\n"
                 "/meme group <send|steal> <wl|bl> <add|del> <group|user> <ID>\n\n"
                 "说明：\n"
                 "- send 控制发表情\n"
                 "- steal 控制偷表情\n"
-                "- 白名单非空时优先生效\n"
+                "- 支持同时设置白名单和黑名单\n"
+                "- priority wl = 白名单优先；priority bl = 黑名单优先\n"
                 "- 支持 group:123456 和 user:123456\n"
                 "- 不填目标时默认使用当前会话目标"
             )
@@ -117,10 +119,25 @@ class CommandHandler:
                 sections = []
                 for action_name, title in (("send", "发表情"), ("steal", "偷表情")):
                     whitelist, blacklist = cfg._get_action_lists(action_name)
-                    mode = "白名单" if whitelist else ("黑名单" if blacklist else "未启用")
+                    priority = cfg._get_action_filter_mode(action_name)
+                    mode = (
+                        "同时启用"
+                        if whitelist and blacklist
+                        else "白名单"
+                        if whitelist
+                        else "黑名单"
+                        if blacklist
+                        else "未启用"
+                    )
+                    priority_label = (
+                        "黑名单优先"
+                        if priority == "blacklist_first"
+                        else "白名单优先"
+                    )
                     sections.append(
                         f"{title}:\n"
                         f"- 模式：{mode}\n"
+                        f"- 优先级：{priority_label}\n"
                         f"- 白名单({len(whitelist)})：{format_items(whitelist)}\n"
                         f"- 黑名单({len(blacklist)})：{format_items(blacklist)}"
                     )
@@ -132,11 +149,24 @@ class CommandHandler:
                 return
 
             whitelist, blacklist = cfg._get_action_lists(raw_scope)
-            mode = "白名单" if whitelist else ("黑名单" if blacklist else "未启用")
+            priority = cfg._get_action_filter_mode(raw_scope)
+            mode = (
+                "同时启用"
+                if whitelist and blacklist
+                else "白名单"
+                if whitelist
+                else "黑名单"
+                if blacklist
+                else "未启用"
+            )
+            priority_label = (
+                "黑名单优先" if priority == "blacklist_first" else "白名单优先"
+            )
             title = "发表情" if raw_scope == "send" else "偷表情"
             yield event.plain_result(
                 f"{title}:\n"
                 f"- 模式：{mode}\n"
+                f"- 优先级：{priority_label}\n"
                 f"- 白名单({len(whitelist)})：{format_items(whitelist)}\n"
                 f"- 黑名单({len(blacklist)})：{format_items(blacklist)}"
             )
@@ -144,6 +174,36 @@ class CommandHandler:
 
         if raw_scope not in {"send", "steal"}:
             yield event.plain_result("目标类型无效，请使用 send 或 steal")
+            return
+
+        if raw_list_name in {"priority", "prio", "order"}:
+            current_mode = cfg._get_action_filter_mode(raw_scope)
+            if raw_action in {"", "show", "list", "ls", "status"}:
+                label = (
+                    "黑名单优先"
+                    if current_mode == "blacklist_first"
+                    else "白名单优先"
+                )
+                yield event.plain_result(
+                    f"{'发表情' if raw_scope == 'send' else '偷表情'} 当前优先级：{label}"
+                )
+                return
+
+            if raw_action in {"wl", "white", "whitelist"}:
+                updated_mode = "whitelist_first"
+                label = "白名单优先"
+            elif raw_action in {"bl", "black", "blacklist"}:
+                updated_mode = "blacklist_first"
+                label = "黑名单优先"
+            else:
+                yield event.plain_result("优先级无效，请使用 wl 或 bl")
+                return
+
+            list_key = f"{raw_scope}_target_filter_mode"
+            ok = bool(cfg.update_config({list_key: updated_mode}))
+            scope_title = "发表情" if raw_scope == "send" else "偷表情"
+            msg = f"已将{scope_title}优先级设置为{label}" if ok else f"设置{scope_title}优先级失败"
+            yield event.plain_result(msg)
             return
 
         if raw_list_name in {"wl", "white", "whitelist"}:

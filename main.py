@@ -8,13 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import (
     EventMessageType,
     PermissionType,
     PlatformAdapterType,
 )
-from astrbot.api.message_components import Image as ImageComponent
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star
 
@@ -432,22 +431,8 @@ class Main(Star):
 
     @staticmethod
     def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
-        """创建 asyncio task 并自动记录未处理异常，避免 fire-and-forget 静默吞异常。"""
-        task = asyncio.create_task(coro, name=name or None)
-
-        def _on_done(t: asyncio.Task):
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc:
-                logger.error(f"后台任务 '{t.get_name()}' 异常: {exc}", exc_info=exc)
-
-        task.add_done_callback(_on_done)
-        return task
-
-    def _get_group_id(self, event: AstrMessageEvent) -> str | None:
-        """委托给 PluginConfig。"""
-        return self.plugin_config.get_group_id(event)
+        """创建 fire-and-forget task，并复用 TaskScheduler 的异常日志。"""
+        return TaskScheduler.create_detached_task(coro, name=name)
 
     def get_event_target(self, event: AstrMessageEvent) -> tuple[str, str]:
         if self.plugin_config is None:
@@ -861,32 +846,8 @@ class Main(Star):
         )
 
     async def _save_index(self, idx: dict[str, Any]):
-        """保存索引到数据库（智能增量更新）。
-
-        根据传入索引与数据库的差异，选择最优更新策略：
-        - 全量替换：删除场景或首次初始化
-        - 增量插入：新增场景
-        """
+        """将当前权威索引同步到数据库与缓存。"""
         await self.db_service.sync_index(idx)
-        await self.cache_service.set_cache("index_cache", idx, persist=False)
-        return
-
-        # 如果数据库为空或有删除操作（条目数减少），使用全量替换
-        if db_count == 0 or idx_count < db_count:
-            await self.db_service.save_index(idx)
-        else:
-            # 增量插入：只处理新增的条目
-            existing_paths = set(self.db_service.get_all_paths())
-            new_entries = [
-                {"path": path, **meta}
-                for path, meta in idx.items()
-                if path not in existing_paths and isinstance(meta, dict)
-            ]
-            if new_entries:
-                await self.db_service.insert_batch(new_entries)
-                logger.debug(f"[DB] 增量插入 {len(new_entries)} 条新记录")
-
-        # 同步到 cache_service 内存缓存（供 WebUI 等模块使用）
         await self.cache_service.set_cache("index_cache", idx, persist=False)
 
     async def _process_image(
@@ -1553,8 +1514,6 @@ class Main(Star):
         Returns:
             float: 延迟秒数，0 表示无延迟
         """
-        import random
-
         min_delay = max(0.0, self.emoji_send_delay)
 
         if not self.emoji_send_delay_random:
@@ -2031,17 +1990,12 @@ class Main(Star):
                 return
 
             logger.info(f"[Tool] 发送选中的表情包: {path} (emotion={emotion})")
-            sent_as_sticker = False
-            try:
-                sent_as_sticker = await self.emoji_selector._try_send_telegram_sticker(
-                    event, path
-                )
-            except Exception:
-                sent_as_sticker = False
+            send_mode = await self.emoji_selector.send_emoji_message(event, path)
+            if not send_mode:
+                yield "鍙戦€佸け璐ワ細琛ㄦ儏鍖呯紪鐮佹垨鍙戦€佸け璐ワ紝璇烽噸璇曘€?"
+                return
+            sent_as_sticker = send_mode == "telegram_sticker"
 
-            if not sent_as_sticker:
-                b64 = await self.image_processor_service._file_to_gif_base64(path)
-                await event.send(MessageChain([ImageComponent.fromBase64(b64)]))
             await self.emoji_selector.record_emoji_usage(path, trigger="llm_tool")
 
             mode_desc = "Telegram贴纸" if sent_as_sticker else "图片"

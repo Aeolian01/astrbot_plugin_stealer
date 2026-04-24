@@ -1258,32 +1258,103 @@ class EmojiSelector:
             logger.debug(f"[Stealer] Telegram 贴纸发送失败，将回退图片发送: {e}")
             return False
 
+    def _should_send_file_directly(self, event: AstrMessageEvent) -> bool:
+        """Prefer local file sends when GIF coercion is disabled and the adapter is friendly."""
+        if getattr(self.plugin, "send_emoji_as_gif", True):
+            return False
+
+        try:
+            platform_name = str(event.get_platform_name() or "").strip().lower()
+        except Exception:
+            platform_name = ""
+
+        return platform_name != "aiocqhttp"
+
+    async def _send_emoji_file_directly(
+        self, event: AstrMessageEvent, emoji_path: str
+    ) -> bool:
+        """Attempt the lowest-overhead file send path and let callers fall back on failure."""
+        if not self._should_send_file_directly(event):
+            return False
+        if not emoji_path or not os.path.exists(emoji_path):
+            return False
+
+        try:
+            make_result = getattr(event, "make_result", None)
+            if not callable(make_result):
+                return False
+
+            result = make_result()
+            if result is None or not hasattr(result, "file_image"):
+                return False
+
+            payload = result.file_image(emoji_path)
+            if payload is None:
+                payload = result
+            if hasattr(payload, "stop_event"):
+                payload = payload.stop_event()
+
+            await event.send(payload)
+            return True
+        except Exception as e:
+            logger.debug(f"[Stealer] file_image 发送失败，回退 base64: {e}")
+            return False
+
+    async def _append_emoji_to_result(
+        self, event: AstrMessageEvent, result: Any, emoji_path: str
+    ) -> bool:
+        """Append an emoji to an existing result, preferring file sends when safe."""
+        if self._should_send_file_directly(event) and hasattr(result, "file_image"):
+            try:
+                result.file_image(emoji_path)
+                return True
+            except Exception as e:
+                logger.debug(f"[Stealer] result.file_image 失败，回退 base64: {e}")
+
+        b64 = await self._encode_emoji(emoji_path)
+        if not b64:
+            return False
+        result.base64_image(b64)
+        return True
+
+    async def send_emoji_message(
+        self, event: AstrMessageEvent, emoji_path: str
+    ) -> str | None:
+        """Send a single emoji using the fastest compatible path."""
+        if await self._try_send_telegram_sticker(event, emoji_path):
+            return "telegram_sticker"
+
+        if await self._send_emoji_file_directly(event, emoji_path):
+            return "file_image"
+
+        from astrbot.api.event import MessageChain
+        from astrbot.api.message_components import Image as ImageComponent
+
+        b64 = await self._encode_emoji(emoji_path)
+        if not b64:
+            return None
+
+        await event.send(MessageChain([ImageComponent.fromBase64(b64)]))
+        return "base64_image"
+
     async def send_emoji_with_text(
         self, event: AstrMessageEvent, emoji_path: str, cleaned_text: str
     ) -> None:
-        """发送表情包（异步场景下直接发送新消息）。"""
+        """Send one emoji message in the fastest compatible format."""
         try:
             if self.plugin._emoji_turn_state(event).is_active_sent():
                 logger.debug("[Stealer] 已主动发送过表情包，跳过自动发送")
                 return
 
-            from astrbot.api.event import MessageChain
-            from astrbot.api.message_components import Image as ImageComponent
-
             if not self._check_group_allowed(event):
                 return
 
-            if await self._try_send_telegram_sticker(event, emoji_path):
-                await self.record_emoji_usage(emoji_path, trigger="auto")
-                logger.debug(f"[Stealer] 已发送 Telegram 贴纸: {emoji_path}")
+            send_mode = await self.send_emoji_message(event, emoji_path)
+            if not send_mode:
                 return
 
-            b64 = await self._encode_emoji(emoji_path)
-            if not b64:
-                return
-            await event.send(MessageChain([ImageComponent.fromBase64(b64)]))
             await self.record_emoji_usage(emoji_path, trigger="auto")
-            logger.debug(f"[Stealer] 已发送表情包: {emoji_path}")
+            logger.debug(f"[Stealer] 已发送表情包 ({send_mode}): {emoji_path}")
 
         except Exception as e:
             logger.error(f"发送表情包失败: {e}", exc_info=True)
@@ -1291,7 +1362,7 @@ class EmojiSelector:
     async def send_explicit_emojis(
         self, event: AstrMessageEvent, emoji_paths: list[str], cleaned_text: str
     ) -> None:
-        """发送显式指定的表情包列表和文本。"""
+        """Append explicitly selected emojis to the current result."""
         from astrbot.api.message_components import Plain
 
         try:
@@ -1300,7 +1371,6 @@ class EmojiSelector:
                 result.result_content_type
             )
 
-            # 保留非 Plain 组件
             for comp in result.chain:
                 if not isinstance(comp, Plain):
                     new_result.chain.append(comp)
@@ -1308,20 +1378,17 @@ class EmojiSelector:
             if cleaned_text.strip():
                 new_result.message(cleaned_text.strip())
 
-            # 依次编码并添加图片
             sent_paths = []
-            for path in emoji_paths:
-                if await self._try_send_telegram_sticker(event, path):
-                    sent_paths.append(path)
+            for path_str in emoji_paths:
+                if await self._try_send_telegram_sticker(event, path_str):
+                    sent_paths.append(path_str)
                     continue
-                b64 = await self._encode_emoji(path)
-                if b64:
-                    new_result.base64_image(b64)
-                    sent_paths.append(path)
+                if await self._append_emoji_to_result(event, new_result, path_str):
+                    sent_paths.append(path_str)
 
             event.set_result(new_result)
-            for path in sent_paths:
-                await self.record_emoji_usage(path, trigger="explicit")
+            for path_str in sent_paths:
+                await self.record_emoji_usage(path_str, trigger="explicit")
         except Exception as e:
             logger.error(f"发送显式表情包失败: {e}", exc_info=True)
 

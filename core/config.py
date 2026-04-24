@@ -35,6 +35,8 @@ class PluginConfig(BaseModel):
     steal_target_blacklist: list[str] = []
     send_target_whitelist: list[str] = []
     send_target_blacklist: list[str] = []
+    steal_target_filter_mode: str = "whitelist_first"
+    send_target_filter_mode: str = "whitelist_first"
 
     # === 模型配置 ===
     vision_provider_id: str = ""
@@ -218,6 +220,7 @@ class PluginConfig(BaseModel):
 
         self._load_category_state()
         self._migrate_category_config()
+        self._refresh_target_policy_cache()
 
     def _read_json_file(self, path: Path):
         try:
@@ -320,6 +323,9 @@ class PluginConfig(BaseModel):
         # 更新 Pydantic 模型
         super().__setattr__(key, value)
 
+        if key in self._TARGET_POLICY_CONFIG_KEYS:
+            self._refresh_target_policy_cache()
+
         # 如果是私有属性或路径属性，跳过回写
         if key.startswith("_") or key in (
             "data_dir",
@@ -376,6 +382,53 @@ class PluginConfig(BaseModel):
         except Exception as e:
             logger.error(f"更新配置失败: {e}")
             return False
+
+    _TARGET_POLICY_CONFIG_KEYS: ClassVar[set[str]] = {
+        "send_target_whitelist",
+        "send_target_blacklist",
+        "send_target_filter_mode",
+        "steal_target_whitelist",
+        "steal_target_blacklist",
+        "steal_target_filter_mode",
+    }
+
+    def _normalize_target_collection(self, values: list[str] | None) -> frozenset[str]:
+        normalized: set[str] = set()
+        for value in values or []:
+            target = self.normalize_target_entry(value)
+            if target:
+                normalized.add(target)
+        return frozenset(normalized)
+
+    def _refresh_target_policy_cache(self) -> None:
+        object.__setattr__(
+            self,
+            "_target_policy_cache",
+            {
+                "send": {
+                    "whitelist": self._normalize_target_collection(
+                        self.send_target_whitelist
+                    ),
+                    "blacklist": self._normalize_target_collection(
+                        self.send_target_blacklist
+                    ),
+                    "mode": self._normalize_filter_mode(
+                        self.send_target_filter_mode
+                    ),
+                },
+                "steal": {
+                    "whitelist": self._normalize_target_collection(
+                        self.steal_target_whitelist
+                    ),
+                    "blacklist": self._normalize_target_collection(
+                        self.steal_target_blacklist
+                    ),
+                    "mode": self._normalize_filter_mode(
+                        self.steal_target_filter_mode
+                    ),
+                },
+            },
+        )
 
     def save_categories(self) -> None:
         self._write_json_file(self.categories_path, self.categories)
@@ -523,6 +576,26 @@ class PluginConfig(BaseModel):
 
         return "", ""
 
+    def get_event_targets(self, event: AstrMessageEvent) -> list[str]:
+        targets: list[str] = []
+        seen: set[str] = set()
+
+        group_id = self.get_group_id(event)
+        if group_id:
+            normalized = self.normalize_target_entry(group_id, "group")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                targets.append(normalized)
+
+        user_id = self.get_user_id(event)
+        if user_id:
+            normalized = self.normalize_target_entry(user_id, "user")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                targets.append(normalized)
+
+        return targets
+
     @staticmethod
     def normalize_target_entry(value: object, default_scope: str = "group") -> str:
         raw = str(value or "").strip()
@@ -554,36 +627,76 @@ class PluginConfig(BaseModel):
         return f"{default_scope}:{raw}" if raw else ""
 
     def _get_action_lists(self, action: str) -> tuple[list[str], list[str]]:
-        normalized = str(action or "").strip().lower()
-        if normalized == "steal":
-            return (
-                list(self.steal_target_whitelist or []),
-                list(self.steal_target_blacklist or []),
-            )
-        elif normalized == "send":
-            return (
-                list(self.send_target_whitelist or []),
-                list(self.send_target_blacklist or []),
-            )
-        return [], []
+        policy = self._get_action_policy(action)
+        return (sorted(policy["whitelist"]), sorted(policy["blacklist"]))
+
+    @staticmethod
+    def _normalize_filter_mode(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"blacklist_first", "blacklist", "bl", "black"}:
+            return "blacklist_first"
+        return "whitelist_first"
+
+    def _get_action_filter_mode(self, action: str) -> str:
+        return str(self._get_action_policy(action)["mode"])
+
+    def _get_action_policy(self, action: str) -> dict[str, object]:
+        cache = getattr(self, "_target_policy_cache", None)
+        if not isinstance(cache, dict):
+            self._refresh_target_policy_cache()
+            cache = getattr(self, "_target_policy_cache", {})
+        return cache.get(str(action or "").strip().lower(), {}) or {}
 
     def is_action_allowed(self, action: str, event: AstrMessageEvent) -> bool:
-        scope, target_id = self.get_event_target(event)
-        if not scope or not target_id:
+        targets = self.get_event_targets(event)
+        if not targets:
             return True
-        return self.is_target_allowed(action, f"{scope}:{target_id}")
+        return self._is_normalized_targets_allowed(action, targets)
 
-    def is_target_allowed(self, action: str, target_entry: str) -> bool:
-        normalized_target = self.normalize_target_entry(target_entry)
-        if not normalized_target:
+    def is_targets_allowed(self, action: str, target_entries: list[str]) -> bool:
+        normalized_targets: list[str] = []
+        seen: set[str] = set()
+        for entry in target_entries or []:
+            normalized = self.normalize_target_entry(entry)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                normalized_targets.append(normalized)
+
+        if not normalized_targets:
             return True
 
-        whitelist, blacklist = self._get_action_lists(action)
+        return self._is_normalized_targets_allowed(action, normalized_targets)
+
+    def _is_normalized_targets_allowed(
+        self, action: str, normalized_targets: list[str]
+    ) -> bool:
+        if not normalized_targets:
+            return True
+
+        policy = self._get_action_policy(action)
+        whitelist = policy.get("whitelist", frozenset())
+        blacklist = policy.get("blacklist", frozenset())
+        filter_mode = str(policy.get("mode", "whitelist_first"))
+        whitelist_hit = any(target in whitelist for target in normalized_targets)
+        blacklist_hit = any(target in blacklist for target in normalized_targets)
+
+        if filter_mode == "blacklist_first":
+            if blacklist_hit:
+                return False
+            if whitelist:
+                return whitelist_hit
+            return True
+
+        if whitelist_hit:
+            return True
+        if blacklist_hit:
+            return False
         if whitelist:
-            return normalized_target in whitelist
-        if blacklist and normalized_target in blacklist:
             return False
         return True
+
+    def is_target_allowed(self, action: str, target_entry: str) -> bool:
+        return self.is_targets_allowed(action, [target_entry])
 
     def is_group_allowed(self, group_id: str) -> bool:
         """检查群组是否允许。"""
