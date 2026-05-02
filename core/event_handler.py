@@ -542,7 +542,8 @@ class EventHandler:
         force_entry = None
         try:
             force_entry = plugin_instance.get_force_capture_entry(event)
-        except Exception:
+        except (AttributeError, KeyError) as e:
+            logger.debug(f"获取强制捕获条目失败: {e}")
             force_entry = None
 
         force_active = force_entry is not None
@@ -550,7 +551,8 @@ class EventHandler:
         try:
             if not force_active and not plugin_instance.is_steal_enabled_for_event(event):
                 return
-        except Exception:
+        except (AttributeError, TypeError, KeyError) as e:
+            logger.warning(f"检查偷图权限失败: {e}")
             return
 
         if not plugin_instance.steal_emoji and not force_active:
@@ -565,58 +567,7 @@ class EventHandler:
             return
 
         if force_active:
-            try:
-                temp_path: str | None = None
-                is_gif = False
-                extra_meta: dict[str, Any] = {}
-
-                if imgs:
-                    img = imgs[0]
-                    extra_meta = {
-                        "image_caption_sources": self._image_caption_cache_sources(img),
-                        "forward_context_image_index": 0,
-                    }
-                    temp_path, is_gif = await self._download_original_image(img)
-                    if not temp_path:
-                        temp_path = await img.convert_to_file_path()
-                elif store_urls:
-                    extra_meta = {"image_caption_sources": [store_urls[0]]}
-                    temp_path, is_gif = await self._download_url_to_temp(store_urls[0])
-
-                if not temp_path or not os.path.exists(temp_path):
-                    await event.send(
-                        MessageChain([Plain(text="❌ 收录失败：图片临时文件不存在")])
-                    )
-                else:
-                    success, idx = await plugin_instance._process_image(
-                        event,
-                        temp_path,
-                        is_temp=True,
-                        is_platform_emoji=True,
-                        extra_meta=extra_meta,
-                    )
-                    if success and idx:
-                        await plugin_instance._save_index(idx)
-                        await event.send(
-                            MessageChain([Plain(text="✅ 已收录并自动分类入库")])
-                        )
-                    else:
-                        await event.send(
-                            MessageChain(
-                                [
-                                    Plain(
-                                        text="❌ 未收录（可能被判定为非表情包/审核不通过/重复或处理失败）"
-                                    )
-                                ]
-                            )
-                        )
-            except Exception as e:
-                await event.send(MessageChain([Plain(text=f"❌ 收录失败：{e}")]))
-            finally:
-                try:
-                    plugin_instance.consume_force_capture(event)
-                except Exception:
-                    pass
+            await self._handle_force_capture(event, plugin_instance, imgs, store_urls)
             return
 
         # 检查是否应该处理图片（节流控制）
@@ -659,8 +610,8 @@ class EventHandler:
                 scope, target_id = cfg.get_event_target(event)
                 if scope and target_id:
                     origin_target_str = f"{scope}:{target_id}"
-        except Exception:
-            pass
+        except (AttributeError, KeyError) as e:
+            logger.debug(f"提取来源群信息失败: {e}")
 
         # 批量处理结果，最后统一保存索引
         merged_idx: dict[str, Any] = {}
@@ -849,6 +800,67 @@ class EventHandler:
         # 批量保存索引（一条消息中的所有图片处理完后统一保存一次）
         if merged_idx:
             await plugin_instance._save_index(merged_idx)
+
+    async def _handle_force_capture(
+        self,
+        event: AstrMessageEvent,
+        plugin_instance,
+        imgs: list,
+        store_urls: list[str],
+    ) -> None:
+        """处理强制捕获模式：下载并处理单张图片后直接返回。"""
+        try:
+            temp_path: str | None = None
+            is_gif = False
+            extra_meta: dict[str, Any] = {}
+
+            if imgs:
+                img = imgs[0]
+                extra_meta = {
+                    "image_caption_sources": self._image_caption_cache_sources(img),
+                    "forward_context_image_index": 0,
+                }
+                temp_path, is_gif = await self._download_original_image(img)
+                if not temp_path:
+                    temp_path = await img.convert_to_file_path()
+            elif store_urls:
+                extra_meta = {"image_caption_sources": [store_urls[0]]}
+                temp_path, is_gif = await self._download_url_to_temp(store_urls[0])
+
+            if not temp_path or not os.path.exists(temp_path):
+                await event.send(
+                    MessageChain([Plain(text="❌ 收录失败：图片临时文件不存在")])
+                )
+            else:
+                success, idx = await plugin_instance._process_image(
+                    event,
+                    temp_path,
+                    is_temp=True,
+                    is_platform_emoji=True,
+                    extra_meta=extra_meta,
+                )
+                if success and idx:
+                    await plugin_instance._save_index(idx)
+                    await event.send(
+                        MessageChain([Plain(text="✅ 已收录并自动分类入库")])
+                    )
+                else:
+                    await event.send(
+                        MessageChain(
+                            [
+                                Plain(
+                                    text="❌ 未收录（可能被判定为非表情包/审核不通过/重复或处理失败）"
+                                )
+                            ]
+                        )
+                    )
+        except Exception as e:
+            await event.send(MessageChain([Plain(text=f"❌ 收录失败：{e}")]))
+        finally:
+            try:
+                plugin_instance.consume_force_capture(event)
+            except (AttributeError, KeyError) as e:
+                logger.debug(f"消费强制捕获条目失败: {e}")
 
     async def _clean_raw_directory(self) -> int:
         """清理raw目录中的所有原始图片文件。"""

@@ -46,10 +46,6 @@ class DatabaseService:
         # 异步锁，保护并发写入
         self._write_lock = asyncio.Lock()
 
-        # 内存缓存（可选，用于热点数据加速）
-        self._category_cache: dict[str, list[str]] = {}
-        self._cache_valid = False
-
     def _ensure_db_dir(self) -> None:
         """确保数据库目录存在。"""
         try:
@@ -245,212 +241,27 @@ class DatabaseService:
             rows = conn.execute("SELECT path FROM emoji").fetchall()
             return [r["path"] for r in rows]
 
-    def get_paths_by_category(self, category: str) -> list[str]:
-        """获取指定分类的所有表情包路径。"""
+    def hash_exists(self, hash_val: str) -> bool:
+        """O(1) 哈希查重，不走全量索引加载。"""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM emoji WHERE hash = ? LIMIT 1", (hash_val,)
+            ).fetchone()
+            return row is not None
+
+    def get_phash_map(self) -> dict[str, str]:
+        """只返回 path→phash 映射，用于感知哈希去重（轻量替代全量索引）。"""
         with self._get_connection() as conn:
             rows = conn.execute(
-                "SELECT path FROM emoji WHERE category = ?", (category,)
+                "SELECT path, phash FROM emoji WHERE phash IS NOT NULL AND phash != ''"
             ).fetchall()
-            return [r["path"] for r in rows]
-
-    def count_by_category(self, category: str) -> int:
-        """统计指定分类的表情包数量。"""
-        with self._get_connection() as conn:
-            result = conn.execute(
-                "SELECT COUNT(*) as cnt FROM emoji WHERE category = ?", (category,)
-            ).fetchone()
-            return result["cnt"] if result else 0
+            return {r["path"]: r["phash"] for r in rows}
 
     def count_total(self) -> int:
         """统计表情包总数。"""
         with self._get_connection() as conn:
             result = conn.execute("SELECT COUNT(*) as cnt FROM emoji").fetchone()
             return result["cnt"] if result else 0
-
-    # ── 插入和更新操作 ──
-
-    async def insert_emoji(
-        self,
-        path: str,
-        hash_val: str,
-        category: str,
-        tags: list[str] | None = None,
-        scenes: list[str] | None = None,
-        desc: str | None = None,
-        phash: str | None = None,
-        source: str | None = None,
-        origin_target: str | None = None,
-        scope_mode: str = "public",
-    ) -> bool:
-        """插入新表情包记录。
-
-        Args:
-            path: 文件路径
-            hash_val: SHA256 哈希
-            category: 分类
-            tags: 标签列表
-            scenes: 场景列表
-            desc: 描述
-            phash: 感知哈希
-            source: 来源
-            origin_target: 来源目标
-            scope_mode: scope 模式
-
-        Returns:
-            bool: 是否成功插入
-        """
-        async with self._write_lock:
-            try:
-                now = int(time.time())
-                await asyncio.to_thread(
-                    self._insert_emoji_sync,
-                    path, hash_val, category, tags or [], scenes or [],
-                    desc, phash, source, origin_target, scope_mode, now
-                )
-                self._cache_valid = False
-                return True
-            except Exception as e:
-                logger.error(f"[DB] 插入表情包失败: {e}")
-                return False
-
-    def _insert_emoji_sync(
-        self,
-        path: str,
-        hash_val: str,
-        category: str,
-        tags: list[str],
-        scenes: list[str],
-        desc: str | None,
-        phash: str | None,
-        source: str | None,
-        origin_target: str | None,
-        scope_mode: str,
-        created_at: int,
-    ) -> None:
-        """同步插入表情包。"""
-        with self._get_connection() as conn:
-            # 使用事务确保一致性
-            conn.execute("BEGIN IMMEDIATE")
-
-            try:
-                # 插入主记录
-                conn.execute("""
-                    INSERT OR REPLACE INTO emoji
-                    (path, hash, phash, category, desc, source, origin_target,
-                     scope_mode, created_at, use_count, last_used_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-                """, (path, hash_val, phash, category, desc, source,
-                      origin_target, scope_mode, created_at))
-
-                # 删除旧标签/场景（如果是 REPLACE）
-                conn.execute("DELETE FROM emoji_tag WHERE path = ?", (path,))
-                conn.execute("DELETE FROM emoji_scene WHERE path = ?", (path,))
-
-                # 插入标签
-                for tag in tags:
-                    if tag:
-                        conn.execute(
-                            "INSERT INTO emoji_tag (path, tag) VALUES (?, ?)",
-                            (path, tag)
-                        )
-
-                # 插入场景
-                for scene in scenes:
-                    if scene:
-                        conn.execute(
-                            "INSERT INTO emoji_scene (path, scene) VALUES (?, ?)",
-                            (path, scene)
-                        )
-
-                conn.execute("COMMIT")
-            except Exception as e:
-                conn.execute("ROLLBACK")
-                logger.error(f"[DB] 插入事务回滚: {e}")
-                raise
-
-    async def update_emoji(
-        self,
-        path: str,
-        **updates: Any,
-    ) -> bool:
-        """更新表情包记录（增量更新）。
-
-        支持更新的字段：category, desc, tags, scenes, use_count, last_used_at
-        """
-        if not updates:
-            return True
-
-        async with self._write_lock:
-            try:
-                await asyncio.to_thread(self._update_emoji_sync, path, updates)
-                self._cache_valid = False
-                return True
-            except Exception as e:
-                logger.error(f"[DB] 更新表情包失败: {e}")
-                return False
-
-    # 允许更新的字段白名单（防止SQL注入）
-    _VALID_UPDATE_FIELDS = frozenset({
-        "category", "desc", "use_count", "last_used_at",
-        "hash", "phash", "source", "origin_target", "scope_mode"
-    })
-
-    def _update_emoji_sync(self, path: str, updates: dict[str, Any]) -> None:
-        """同步更新表情包。"""
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-
-            try:
-                # 白名单过滤字段名（防止SQL注入）
-                main_updates = {
-                    k: v for k, v in updates.items()
-                    if k in self._VALID_UPDATE_FIELDS
-                }
-
-                if main_updates:
-                    # 使用白名单验证的字段名构建SQL（安全）
-                    clauses = ", ".join(f"{k} = ?" for k in main_updates.keys())
-                    values = list(main_updates.values()) + [path]
-                    conn.execute(
-                        f"UPDATE emoji SET {clauses} WHERE path = ?",
-                        values
-                    )
-
-                # 更新标签（完整替换）
-                if "tags" in updates:
-                    conn.execute("DELETE FROM emoji_tag WHERE path = ?", (path,))
-                    for tag in updates["tags"] or []:
-                        if tag:
-                            conn.execute(
-                                "INSERT INTO emoji_tag (path, tag) VALUES (?, ?)",
-                                (path, tag)
-                            )
-
-                # 更新场景（完整替换）
-                if "scenes" in updates:
-                    conn.execute("DELETE FROM emoji_scene WHERE path = ?", (path,))
-                    for scene in updates["scenes"] or []:
-                        if scene:
-                            conn.execute(
-                                "INSERT INTO emoji_scene (path, scene) VALUES (?, ?)",
-                                (path, scene)
-                            )
-
-                conn.execute("COMMIT")
-            except Exception as e:
-                conn.execute("ROLLBACK")
-                logger.error(f"[DB] 更新事务回滚: {e}")
-                raise
-
-    async def increment_usage(self, path: str) -> bool:
-        """增加使用次数并更新最后使用时间。"""
-        async with self._write_lock:
-            try:
-                await asyncio.to_thread(self.increment_usage_sync, path)
-                return True
-            except Exception as e:
-                logger.error(f"[DB] 增加使用次数失败: {e}")
-                return False
 
     def increment_usage_sync(self, path: str) -> None:
         """同步增加使用次数。"""
@@ -460,23 +271,6 @@ class DatabaseService:
                 "UPDATE emoji SET use_count = use_count + 1, last_used_at = ? WHERE path = ?",
                 (now, path)
             )
-
-    async def delete_emoji(self, path: str) -> bool:
-        """删除表情包记录。"""
-        async with self._write_lock:
-            try:
-                await asyncio.to_thread(self._delete_emoji_sync, path)
-                self._cache_valid = False
-                return True
-            except Exception as e:
-                logger.error(f"[DB] 删除表情包失败: {e}")
-                return False
-
-    def _delete_emoji_sync(self, path: str) -> None:
-        """同步删除表情包。"""
-        with self._get_connection() as conn:
-            # CASCADE 会自动删除关联的标签和场景
-            conn.execute("DELETE FROM emoji WHERE path = ?", (path,))
 
     # ── 批量操作 ──
 
@@ -495,7 +289,6 @@ class DatabaseService:
         async with self._write_lock:
             try:
                 count = await asyncio.to_thread(self._insert_batch_sync, emojis)
-                self._cache_valid = False
                 return count
             except Exception as e:
                 logger.error(f"[DB] 批量插入失败: {e}")
@@ -565,191 +358,6 @@ class DatabaseService:
 
         return count
 
-    # ── 搜索操作 ──
-
-    def search_by_category(
-        self,
-        category: str,
-        exclude_recent: list[str] | None = None,
-        limit: int = 10,
-    ) -> list[str]:
-        """按分类搜索表情包路径。
-
-        Args:
-            category: 分类名
-            exclude_recent: 要排除的路径列表（最近使用的）
-            limit: 返回数量限制
-
-        Returns:
-            list[str]: 匹配的表情包路径列表
-        """
-        with self._get_connection() as conn:
-            if exclude_recent:
-                # 使用 NOT IN 排除最近使用的
-                placeholders = ", ".join("?" for _ in exclude_recent)
-                query = f"""
-                    SELECT path FROM emoji
-                    WHERE category = ? AND path NOT IN ({placeholders})
-                    ORDER BY use_count DESC, last_used_at ASC
-                    LIMIT ?
-                """
-                params = [category] + exclude_recent + [limit]
-            else:
-                query = """
-                    SELECT path FROM emoji
-                    WHERE category = ?
-                    ORDER BY use_count DESC, last_used_at ASC
-                    LIMIT ?
-                """
-                params = [category, limit]
-
-            rows = conn.execute(query, params).fetchall()
-            return [r["path"] for r in rows]
-
-    def search_by_tag(
-        self,
-        tag: str,
-        category: str | None = None,
-        limit: int = 10,
-    ) -> list[str]:
-        """按标签搜索表情包。
-
-        Args:
-            tag: 标签关键词
-            category: 可选的分类过滤
-            limit: 返回数量限制
-
-        Returns:
-            list[str]: 匹配的表情包路径列表
-        """
-        with self._get_connection() as conn:
-            if category:
-                query = """
-                    SELECT DISTINCT e.path FROM emoji e
-                    JOIN emoji_tag t ON e.path = t.path
-                    WHERE t.tag LIKE ? AND e.category = ?
-                    ORDER BY e.use_count DESC
-                    LIMIT ?
-                """
-                params = [f"%{tag}%", category, limit]
-            else:
-                query = """
-                    SELECT DISTINCT e.path FROM emoji e
-                    JOIN emoji_tag t ON e.path = t.path
-                    WHERE t.tag LIKE ?
-                    ORDER BY e.use_count DESC
-                    LIMIT ?
-                """
-                params = [f"%{tag}%", limit]
-
-            rows = conn.execute(query, params).fetchall()
-            return [r["path"] for r in rows]
-
-    def search_by_desc(
-        self,
-        keyword: str,
-        category: str | None = None,
-        limit: int = 10,
-    ) -> list[str]:
-        """按描述关键词搜索。
-
-        Args:
-            keyword: 描述关键词
-            category: 可选的分类过滤
-            limit: 返回数量限制
-
-        Returns:
-            list[str]: 匹配的表情包路径列表
-        """
-        with self._get_connection() as conn:
-            if category:
-                query = """
-                    SELECT path FROM emoji
-                    WHERE desc LIKE ? AND category = ?
-                    ORDER BY use_count DESC
-                    LIMIT ?
-                """
-                params = [f"%{keyword}%", category, limit]
-            else:
-                query = """
-                    SELECT path FROM emoji
-                    WHERE desc LIKE ?
-                    ORDER BY use_count DESC
-                    LIMIT ?
-                """
-                params = [f"%{keyword}%", limit]
-
-            rows = conn.execute(query, params).fetchall()
-            return [r["path"] for r in rows]
-
-    def search_comprehensive(
-        self,
-        query: str,
-        categories: list[str] | None = None,
-        exclude_paths: list[str] | None = None,
-        limit: int = 10,
-    ) -> list[tuple[str, float]]:
-        """综合搜索：分类、标签、描述匹配。
-
-        Args:
-            query: 搜索关键词
-            categories: 候选分类列表
-            exclude_paths: 要排除的路径
-            limit: 返回数量限制
-
-        Returns:
-            list[tuple[str, float]]: (路径, 匹配得分) 列表
-        """
-        results: dict[str, float] = {}
-
-        with self._get_connection() as conn:
-            # 1. 分类精确匹配（得分最高）
-            if categories:
-                for cat in categories:
-                    rows = conn.execute(
-                        "SELECT path FROM emoji WHERE category = ?",
-                        (cat,)
-                    ).fetchall()
-                    for r in rows:
-                        results[r["path"]] = max(results.get(r["path"], 0), 0.8)
-
-            # 2. 标签匹配
-            rows = conn.execute(
-                "SELECT DISTINCT e.path FROM emoji e "
-                "JOIN emoji_tag t ON e.path = t.path "
-                "WHERE t.tag LIKE ?",
-                (f"%{query}%",)
-            ).fetchall()
-            for r in rows:
-                results[r["path"]] = max(results.get(r["path"], 0), 0.6)
-
-            # 3. 描述匹配
-            rows = conn.execute(
-                "SELECT path FROM emoji WHERE desc LIKE ?",
-                (f"%{query}%",)
-            ).fetchall()
-            for r in rows:
-                results[r["path"]] = max(results.get(r["path"], 0), 0.4)
-
-            # 4. 场景匹配
-            rows = conn.execute(
-                "SELECT DISTINCT e.path FROM emoji e "
-                "JOIN emoji_scene s ON e.path = s.path "
-                "WHERE s.scene LIKE ?",
-                (f"%{query}%",)
-            ).fetchall()
-            for r in rows:
-                results[r["path"]] = max(results.get(r["path"], 0), 0.5)
-
-        # 排除指定路径
-        if exclude_paths:
-            for p in exclude_paths:
-                results.pop(p, None)
-
-        # 按得分排序并限制数量
-        sorted_results = sorted(results.items(), key=lambda x: x[1], reverse=True)
-        return sorted_results[:limit]
-
     # ── 兼容旧接口 ──
 
     def get_index_cache_readonly(self) -> dict[str, Any]:
@@ -803,7 +411,6 @@ class DatabaseService:
         """Synchronize the database to match a full index snapshot."""
         async with self._write_lock:
             await asyncio.to_thread(self._sync_index_sync, idx)
-            self._cache_valid = False
 
     def _sync_index_sync(self, idx: dict[str, Any]) -> None:
         desired_index = {
@@ -952,7 +559,6 @@ class DatabaseService:
         async with self._write_lock:
             try:
                 await asyncio.to_thread(self._clear_all_sync)
-                self._cache_valid = False
             except Exception as e:
                 logger.error(f"[DB] 清空数据失败: {e}")
 
@@ -1039,12 +645,6 @@ class DatabaseService:
     def get_corpus_signature(self) -> str:
         """获取语料库签名，用于 BM25 索引变更检测。"""
         return self._build_search_signature_from_index(self.get_index_cache_readonly())
-
-    def vacuum(self) -> None:
-        """执行 VACUUM 优化数据库空间。"""
-        with self._get_connection() as conn:
-            conn.execute("VACUUM")
-            logger.info("[DB] VACUUM 完成")
 
     # ── 分页查询 ──
 

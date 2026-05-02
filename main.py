@@ -148,7 +148,6 @@ class Main(Star):
         self.smart_emotion_matcher = SmartEmotionMatcher(self)
 
         # 运行时属性
-        self.backend_tag: str = self.BACKEND_TAG
         self._migration_done: bool = False  # 迁移只执行一次
         self._auto_emoji_cooldowns: dict[str, float] = {}
         self._auto_emoji_cooldowns_max = 1000  # 最大条目数，防止内存泄漏
@@ -326,7 +325,6 @@ class Main(Star):
 
         self.image_processor_service.update_config(
             emoji_classification_prompt=final_prompts.get("emoji_classification_prompt"),
-            combined_analysis_prompt=prompts.get("COMBINED_ANALYSIS_PROMPT"),
             emoji_classification_with_filter_prompt=final_prompts.get(
                 "emoji_classification_with_filter_prompt"
             ),
@@ -494,9 +492,6 @@ class Main(Star):
     def is_steal_enabled_for_event(self, event: AstrMessageEvent) -> bool:
         return self._is_action_enabled_for_event("steal", event)
 
-    def is_meme_enabled_for_event(self, event: AstrMessageEvent) -> bool:
-        return self.is_send_enabled_for_event(event)
-
     def begin_force_capture(self, event: AstrMessageEvent, seconds: int) -> None:
         """委托给 EventHandler。"""
         event_handler = self._get_event_handler(
@@ -586,10 +581,6 @@ class Main(Star):
             logger.info("WebUI 重启成功")
         except Exception as e:
             logger.error(f"重启 WebUI 失败: {e}", exc_info=True)
-            # 启动失败，恢复旧服务引用
-            if old_server and self.web_server != old_server:
-                self.web_server = old_server
-                logger.info("已恢复旧的 WebUI 服务")
 
     def _apply_plugin_config_updates(self, config_dict: dict) -> None:
         """将更新字典写回 PluginConfig（包含 webui 嵌套字段兼容）。"""
@@ -622,7 +613,6 @@ class Main(Star):
             content_filtration=self.content_filtration,
             vision_provider_id=self.vision_provider_id,
             emoji_classification_prompt=final_prompts.get("emoji_classification_prompt"),
-            combined_analysis_prompt=getattr(self, "COMBINED_ANALYSIS_PROMPT", None),
             emoji_classification_with_filter_prompt=final_prompts.get(
                 "emoji_classification_with_filter_prompt"
             ),
@@ -916,7 +906,6 @@ class Main(Star):
                     idx=idx,
                     categories=self.categories,
                     content_filtration=self.content_filtration,
-                    backend_tag=self.backend_tag,
                     is_platform_emoji=is_platform_emoji,
                     extra_meta=extra_meta,
                 ),
@@ -1040,8 +1029,12 @@ class Main(Star):
                 if self.steal_emoji:
                     logger.debug("开始执行容量控制任务")
 
-                    # 一次性加载索引，用于无效清理和容量控制
-                    image_index = await self._load_index()
+                    # 从内存缓存获取索引，避免每次从 DB 全量重建
+                    image_index = (
+                        self.cache_service.get_index_cache_readonly()
+                        if self.cache_service
+                        else await self._load_index()
+                    )
                     logger.debug(f"当前索引条目数: {len(image_index)}")
 
                     # 1) 收集无效路径
@@ -1117,26 +1110,6 @@ class Main(Star):
             except Exception as e:
                 logger.error(f"容量控制任务发生错误: {e}", exc_info=True)
                 continue
-
-    async def _clean_raw_directory(self) -> int:
-        """按时间定时清理raw目录中的原始图片"""
-        # 委托给 EventHandler 类处理
-        event_handler = self._get_event_handler(
-            log_message="event_handler 未初始化，无法执行raw目录清理"
-        )
-        if event_handler is None:
-            return 0
-        return await event_handler._clean_raw_directory()
-
-    async def _enforce_capacity(self, idx: dict):
-        """执行容量控制，删除最旧的图片。"""
-        # 委托给 EventHandler 类处理
-        event_handler = self._get_event_handler(
-            log_message="event_handler 未初始化，无法执行容量控制"
-        )
-        if event_handler is None:
-            return
-        await event_handler._enforce_capacity(idx)
 
     @filter.on_llm_request()
     async def _inject_emotion_instruction(self, event: AstrMessageEvent, request):
@@ -1469,7 +1442,7 @@ class Main(Star):
 
         if not self.auto_send:
             reason = "auto_send_disabled"
-        elif not self.is_meme_enabled_for_event(event):
+        elif not self.is_send_enabled_for_event(event):
             reason = "meme_disabled"
         elif not await self._is_auto_emoji_cooldown_ready(event):
             reason = "cooldown"
@@ -1587,7 +1560,7 @@ class Main(Star):
                 return
 
             # 检查群聊是否允许
-            if not self.is_meme_enabled_for_event(event):
+            if not self.is_send_enabled_for_event(event):
                 logger.debug("[Stealer] 当前群聊已禁用表情包功能")
                 return
 
@@ -1887,7 +1860,7 @@ class Main(Star):
                 yield "搜索失败：缺少 query 参数。请传入你当前心情词，例如：开心、无语、尴尬、感谢。"
                 return
 
-            if not self.is_meme_enabled_for_event(event):
+            if not self.is_send_enabled_for_event(event):
                 yield "搜索失败：当前群聊已禁用表情包功能"
                 return
 
@@ -1988,7 +1961,7 @@ class Main(Star):
         turn_state.mark_active_sent()
 
         try:
-            if not self.is_meme_enabled_for_event(event):
+            if not self.is_send_enabled_for_event(event):
                 yield "发送失败：当前群聊已禁用表情包功能"
                 return
 

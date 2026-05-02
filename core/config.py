@@ -300,17 +300,11 @@ class PluginConfig(BaseModel):
             return
         removed = False
         if "categories" in self._data:
-            try:
-                del self._data["categories"]
-                removed = True
-            except Exception:
-                pass
+            del self._data["categories"]
+            removed = True
         if "category_info" in self._data:
-            try:
-                del self._data["category_info"]
-                removed = True
-            except Exception:
-                pass
+            del self._data["category_info"]
+            removed = True
         if removed and hasattr(self._data, "save_config"):
             self._data.save_config()
 
@@ -320,44 +314,16 @@ class PluginConfig(BaseModel):
             self._data.save_config({"webui": self.webui.model_dump()})
 
     def __setattr__(self, key: str, value: Any):
-        # 更新 Pydantic 模型
         super().__setattr__(key, value)
 
         if key in self._TARGET_POLICY_CONFIG_KEYS:
             self._refresh_target_policy_cache()
 
-        # 如果是私有属性或路径属性，跳过回写
-        if key.startswith("_") or key in (
-            "data_dir",
-            "categories_path",
-            "raw_dir",
-            "categories_dir",
-            "cache_dir",
-            "category_info_path",
-        ):
-            return
         if key in ("categories", "category_info"):
             if key == "categories":
                 self.save_categories()
             else:
                 self.save_category_info()
-            return
-
-        # 回写到 AstrBotConfig
-        if hasattr(self, "_data") and self._data is not None:
-            if hasattr(self._data, "save_config"):
-                try:
-                    # 对于 webui 这种嵌套模型，如果是直接替换整个 webui 对象，这里可以处理
-                    # 但如果是修改 webui.port，不会触发这里的 __setattr__
-                    # 需要手动调用 save_webui_config
-                    if key == "webui" and isinstance(value, WebuiConfig):
-                        self._data.save_config({key: value.model_dump()})
-                    else:
-                        self._data.save_config({key: value})
-                except Exception:
-                    pass
-            elif isinstance(self._data, dict):
-                self._data[key] = value
 
     def update_config(self, updates: dict) -> bool:
         """批量更新配置项。

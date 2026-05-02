@@ -11,32 +11,12 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-try:
-    from .text_similarity import (
-        BM25,
-        _extract_words,
-        calculate_hybrid_similarity,
-        tokenize_for_bm25,
-    )
-except ImportError:
-    BM25 = None
-
-    def _extract_words(text: str) -> set[str]:
-        return set(text.split())
-
-    def calculate_hybrid_similarity(text1: str, text2: str) -> float:
-        text1_lower = text1.lower()
-        text2_lower = text2.lower()
-        if text2_lower in text1_lower or text1_lower in text2_lower:
-            return 0.5
-        words1 = set(text1_lower.split())
-        words2 = set(text2_lower.split())
-        if words1 and words2:
-            return len(words1 & words2) / max(len(words1), len(words2))
-        return 0.0
-
-    def tokenize_for_bm25(text: str) -> tuple[str, ...]:
-        return tuple(text.lower().split())
+from .text_similarity import (
+    BM25,
+    _extract_words,
+    calculate_hybrid_similarity,
+    tokenize_for_bm25,
+)
 
 
 class EmojiSelector:
@@ -70,6 +50,19 @@ class EmojiSelector:
         self._bm25_doc_paths: list[str] = []
         self._bm25_dirty: bool = True
         self._bm25_signature: str = ""
+
+    def _get_index(self) -> dict[str, Any]:
+        db_service = getattr(self.plugin, "db_service", None)
+        if db_service:
+            idx = db_service.get_index_cache_readonly()
+            if idx:
+                return idx
+        cache_service = getattr(self.plugin, "cache_service", None)
+        if cache_service:
+            idx = cache_service.get_index_cache_readonly()
+            if idx:
+                return idx
+        return {}
 
     @staticmethod
     def _search_signature_from_index(idx: dict[str, Any]) -> str:
@@ -120,15 +113,11 @@ class EmojiSelector:
             return
 
         # 优先使用数据库服务
-        db_service = getattr(self.plugin, "db_service", None)
         cache_service = getattr(self.plugin, "cache_service", None)
         explicit_idx = idx is not None
 
         if idx is None:
-            if db_service:
-                idx = db_service.get_index_cache_readonly() or {}
-            elif cache_service:
-                idx = cache_service.get_index_cache_readonly() or {}
+            idx = self._get_index()
 
         if not idx:
             return
@@ -539,21 +528,6 @@ class EmojiSelector:
 
             return None
 
-    async def select_emoji_smart(
-        self,
-        category: str,
-        context_text: str,
-        event: AstrMessageEvent | None = None,
-    ) -> str | None:
-        """智能选择表情包（强制智能）。"""
-        async with self._selection_lock:
-            return await self._select_emoji_smart_impl(
-                category,
-                context_text,
-                candidate_categories=self._get_candidate_categories(category),
-                event=event,
-            )
-
     def _select_emoji_random_impl(
         self,
         category: str,
@@ -561,16 +535,7 @@ class EmojiSelector:
     ) -> str | None:
         try:
             files: list[Path] = []
-            db_service = getattr(self.plugin, "db_service", None)
-            cache_service = getattr(self.plugin, "cache_service", None)
-
-            if db_service:
-                idx = db_service.get_index_cache_readonly() or {}
-            elif cache_service:
-                idx = cache_service.get_index_cache_readonly() or {}
-            else:
-                idx = {}
-
+            idx = self._get_index()
             for file_path, data in idx.items():
                     if not isinstance(data, dict):
                         continue
@@ -658,16 +623,7 @@ class EmojiSelector:
     ) -> str | None:
         """智能选择表情包实现（内部方法）。"""
         try:
-            db_service = getattr(self.plugin, "db_service", None)
-            cache_service = getattr(self.plugin, "cache_service", None)
-
-            if db_service:
-                idx = db_service.get_index_cache_readonly() or {}
-            elif cache_service:
-                idx = cache_service.get_index_cache_readonly() or {}
-            else:
-                return None
-
+            idx = self._get_index()
             if not idx:
                 return None
 
@@ -890,12 +846,7 @@ class EmojiSelector:
             logger.debug(f"[BM25] 查询='{query}', tokens={query_tokens}, top_doc_scores={bm25_results[:10]}")
 
             if not idx:
-                db_service = getattr(self.plugin, "db_service", None)
-                cache_service = getattr(self.plugin, "cache_service", None)
-                if db_service:
-                    idx = db_service.get_index_cache_readonly() or {}
-                elif cache_service:
-                    idx = cache_service.get_index_cache_readonly() or {}
+                idx = self._get_index()
 
             recently_used_paths: set[str] = set()
             for cat_paths in self._recent_usage.values():
@@ -944,12 +895,7 @@ class EmojiSelector:
         """降级搜索：使用旧的评分算法。"""
         try:
             if idx is None:
-                db_service = getattr(self.plugin, "db_service", None)
-                cache_service = getattr(self.plugin, "cache_service", None)
-                if db_service:
-                    idx = db_service.get_index_cache_readonly() or {}
-                elif cache_service:
-                    idx = cache_service.get_index_cache_readonly() or {}
+                idx = self._get_index()
 
             if not idx:
                 return []

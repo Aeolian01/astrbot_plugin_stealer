@@ -43,8 +43,6 @@ class WebServer:
         self._cookie_name: str = "stealer_webui_session"
         self._sessions: dict[str, float] = {}
         self._last_session_cleanup: float = 0.0  # 上次 session 清理时间
-        self._session_cleanup_interval: int = self.SESSION_CLEANUP_INTERVAL
-
         # 批量上传任务跟踪
         self._batch_upload_tasks: dict[str, dict] = {}
 
@@ -131,7 +129,10 @@ class WebServer:
                 self.plugin.categories = category_keys
 
     def _get_runtime_index_snapshot(self) -> dict[str, Any]:
-        """Prefer the database snapshot when available to keep WebUI data complete."""
+        """优先用内存缓存（快速），DB 为空时回退到 DB 全量加载。"""
+        cache_idx = self.plugin.cache_service.get_index_cache_readonly()
+        if cache_idx:
+            return cache_idx
         db_service = self._get_db_service()
         if db_service and getattr(db_service, "count_total", None):
             try:
@@ -140,8 +141,8 @@ class WebServer:
                     if callable(get_index):
                         return get_index()
             except Exception as db_error:
-                logger.warning(f"Falling back to cache snapshot: {db_error}")
-        return self.plugin.cache_service.get_index_cache_readonly()
+                logger.warning(f"DB index snapshot fallback failed: {db_error}")
+        return {}
 
     async def _update_runtime_index(
         self, updater, *, raise_on_sync_error: bool = False
@@ -414,7 +415,8 @@ class WebServer:
         try:
             auth_enabled = getattr(self.plugin, "webui_auth_enabled", True)
             return bool(auth_enabled)
-        except Exception:
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"检查认证状态失败，默认启用认证: {e}")
             return True
 
     def _get_expected_secret(self) -> str:
@@ -484,7 +486,7 @@ class WebServer:
             now = time.time()
 
             # 定期清理所有过期 session，防止内存泄漏
-            if now - self._last_session_cleanup > self._session_cleanup_interval:
+            if now - self._last_session_cleanup > self.SESSION_CLEANUP_INTERVAL:
                 expired = [k for k, v in self._sessions.items() if v < now]
                 for k in expired:
                     self._sessions.pop(k, None)

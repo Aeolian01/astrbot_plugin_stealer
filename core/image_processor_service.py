@@ -88,7 +88,6 @@ class ImageProcessorService:
 
         # 图片分类结果缓存，key为图片哈希，value为分类结果元组
         self._image_cache: dict[str, dict] = {}
-        self._image_cache_max_size = self.IMAGE_CACHE_MAX_SIZE
         self._cache_expire_time = self.CACHE_EXPIRE_TIME
         self._gif_base64_cache: dict[str, tuple[float, str]] = {}
         self._gif_base64_cache_max_size = self.GIF_CACHE_MAX_SIZE
@@ -121,9 +120,6 @@ class ImageProcessorService:
             "EMOJI_CLASSIFICATION_WITH_FILTER_PROMPT",
             _FALLBACK_FILTER_PROMPT,
         )
-
-        # 保留combined_analysis_prompt作为备用
-        self.combined_analysis_prompt = self.emoji_classification_prompt
 
         # 配置参数（初始值从 plugin_config 读取，后续通过 update_config 更新）
         self.categories = (
@@ -253,7 +249,6 @@ class ImageProcessorService:
         content_filtration=None,
         vision_provider_id=None,
         emoji_classification_prompt=None,
-        combined_analysis_prompt=None,
         emoji_classification_with_filter_prompt=None,
     ):
         """更新图片处理器配置。
@@ -263,7 +258,6 @@ class ImageProcessorService:
             content_filtration: 是否进行内容过滤
             vision_provider_id: 视觉模型提供者ID
             emoji_classification_prompt: 表情包分类提示词
-            combined_analysis_prompt: 综合分析提示词
             emoji_classification_with_filter_prompt: 带审核的表情包分析提示词
         """
         if categories is not None:
@@ -276,8 +270,6 @@ class ImageProcessorService:
             self._cached_framework_vlm_id = None
         if emoji_classification_prompt is not None:
             self.emoji_classification_prompt = emoji_classification_prompt
-        if combined_analysis_prompt is not None:
-            self.combined_analysis_prompt = combined_analysis_prompt
         if emoji_classification_with_filter_prompt is not None:
             self.emoji_classification_with_filter_prompt = (
                 emoji_classification_with_filter_prompt
@@ -388,7 +380,6 @@ class ImageProcessorService:
         idx: dict[str, Any] | None = None,
         categories: list[str] | None = None,
         content_filtration: bool | None = None,
-        backend_tag: str | None = None,
         is_platform_emoji: bool = False,
         extra_meta: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any] | None]:
@@ -401,7 +392,6 @@ class ImageProcessorService:
             idx: 索引字典
             categories: 分类列表
             content_filtration: 是否进行内容过滤
-            backend_tag: 后端标签
             is_platform_emoji: 是否为平台标记的表情包
 
         Returns:
@@ -529,23 +519,18 @@ class ImageProcessorService:
 
         # 持久化索引
         if hasattr(self.plugin, "cache_service"):
-            persistent_idx = self.plugin.cache_service.get_index_cache()
+            db_service = getattr(self.plugin, "db_service", None)
 
-            # 1) SHA256 精确匹配
-            for v in persistent_idx.values():
-                if isinstance(v, dict) and v.get("hash") == hash_val:
-                    logger.debug(f"[去重] SHA256 精确匹配命中: {hash_val[:16]}...")
-                    await _cleanup_temp()
-                    return True
+            # 1) SHA256 精确匹配 — SQL 替代全量索引
+            if db_service and db_service.hash_exists(hash_val):
+                logger.debug(f"[去重] SHA256 精确匹配命中: {hash_val[:16]}...")
+                await _cleanup_temp()
+                return True
 
-            # 2) 感知哈希视觉相似度匹配
-            if phash_val:
-                for entry_path, v in persistent_idx.items():
-                    if not isinstance(v, dict):
-                        continue
-                    existing_phash = v.get("phash", "")
-                    if not existing_phash:
-                        continue
+            # 2) 感知哈希视觉相似度匹配 — 只查 pHash 映射
+            if phash_val and db_service:
+                phash_map = db_service.get_phash_map()
+                for entry_path, existing_phash in phash_map.items():
                     distance = self._hamming_distance(phash_val, existing_phash)
                     if distance <= self.PHASH_HAMMING_THRESHOLD:
                         logger.info(
@@ -564,23 +549,25 @@ class ImageProcessorService:
                 return True
         else:
             # 无 cache_service 时回退到传入的 idx
+            db_service = getattr(self.plugin, "db_service", None)
+            if db_service and db_service.hash_exists(hash_val):
+                logger.debug(f"[去重] SHA256 匹配命中 (DB): {hash_val[:16]}...")
+                await _cleanup_temp()
+                return True
+
             for v in idx.values():
                 if isinstance(v, dict) and v.get("hash") == hash_val:
                     logger.debug(f"[去重] SHA256 匹配命中 (idx): {hash_val[:16]}...")
                     await _cleanup_temp()
                     return True
 
-            if phash_val:
-                for entry_path, v in idx.items():
-                    if not isinstance(v, dict):
-                        continue
-                    existing_phash = v.get("phash", "")
-                    if not existing_phash:
-                        continue
+            if phash_val and db_service:
+                phash_map = db_service.get_phash_map()
+                for entry_path, existing_phash in phash_map.items():
                     distance = self._hamming_distance(phash_val, existing_phash)
                     if distance <= self.PHASH_HAMMING_THRESHOLD:
                         logger.info(
-                            f"[去重] 感知哈希匹配命中 (idx): "
+                            f"[去重] 感知哈希匹配命中 (DB): "
                             f"距离={distance}, 已有={entry_path}"
                         )
                         await _cleanup_temp()
@@ -830,7 +817,6 @@ class ImageProcessorService:
         event: AstrMessageEvent | None,
         file_path: str,
         categories=None,
-        backend_tag=None,
         content_filtration=None,
         caption_hint: str = "",
     ) -> tuple[str, list[str], str, str, list[str]]:
@@ -840,7 +826,6 @@ class ImageProcessorService:
             event: 消息事件
             file_path: 图片绝对路径
             categories: 分类列表（可选，默认使用 self.categories）
-            backend_tag: 后端标签（保留接口兼容）
             content_filtration: 是否进行内容过滤（可选，默认使用 self.content_filtration）
 
         Returns:
@@ -1145,9 +1130,8 @@ class ImageProcessorService:
             if actual_img_path != img_path:
                 temp_file = actual_img_path  # 标记为临时文件，分析后删除
 
-            # 先使用标准 file URI；若框架版本对 URI 解析异常，再回退到本地绝对路径。
+            # 直接传入本地绝对路径，框架内部会自动处理路径转换
             resolved_img_path = str(Path(actual_img_path).resolve())
-            file_url = Path(actual_img_path).resolve().as_uri()
 
             # 如果是动图拼接，添加专用提示词前缀
             actual_prompt = prompt
@@ -1160,18 +1144,7 @@ class ImageProcessorService:
                 )
                 actual_prompt = animated_prefix + prompt
 
-            try:
-                return await self._do_vlm_call(provider_id, actual_prompt, file_url)
-            except Exception as e:
-                if not self._is_file_not_found_error(e):
-                    raise
-                logger.warning(
-                    "VLM 读取 file URI 失败，回退为本地绝对路径重试: "
-                    f"{resolved_img_path}"
-                )
-                return await self._do_vlm_call(
-                    provider_id, actual_prompt, resolved_img_path
-                )
+            return await self._do_vlm_call(provider_id, actual_prompt, resolved_img_path)
         finally:
             # 清理临时文件
             if temp_file and os.path.exists(temp_file):
@@ -1519,7 +1492,7 @@ class ImageProcessorService:
 
     def _evict_image_cache(self) -> None:
         """淘汰 _image_cache 中最旧的条目，保持在最大容量以内。"""
-        if len(self._image_cache) <= self._image_cache_max_size:
+        if len(self._image_cache) <= self.IMAGE_CACHE_MAX_SIZE:
             return
         # 按 timestamp 排序，保留最新的一半
         sorted_items = sorted(
@@ -1727,17 +1700,6 @@ class ImageProcessorService:
             logger.error(f"删除文件失败: {file_path}, 错误: {e}")
             return False
 
-    async def pick_vision_provider(self, event) -> str | None:
-        """选择视觉模型提供商。
-
-        Args:
-            event: 消息事件对象
-
-        Returns:
-            str | None: 提供商ID
-        """
-        return await self._resolve_vision_provider(event)
-
     async def _resolve_vision_provider(self, event=None) -> str | None:
         """统一的视觉模型 provider 解析逻辑。
 
@@ -1792,6 +1754,59 @@ class ImageProcessorService:
         )
         return None
 
+    @staticmethod
+    def _generate_thumb_uri(pth: str, size: int = 84) -> str:
+        if PILImage is None or not os.path.exists(pth):
+            return ""
+        try:
+            with PILImage.open(pth) as im:
+                try:
+                    if getattr(im, "is_animated", False):
+                        im.seek(0)
+                except Exception:
+                    pass
+                im = im.convert("RGBA")
+                im.thumbnail((size, size), LANCZOS or PILImage.BICUBIC)
+                canvas = PILImage.new("RGBA", (size, size), (255, 255, 255, 0))
+                x = (size - im.size[0]) // 2
+                y = (size - im.size[1]) // 2
+                canvas.paste(im, (x, y), im)
+                buf = BytesIO()
+                canvas.save(buf, format="PNG", optimize=True)
+                return "data:image/png;base64," + base64.b64encode(
+                    buf.getvalue()
+                ).decode("utf-8")
+        except Exception:
+            return ""
+
+    def _render_items_for_list(
+        self, items: list[dict], thumb_size: int = 84
+    ) -> list[dict]:
+        return [
+            {
+                "index": int(item.get("index", 0) or 0),
+                "desc": str(item.get("desc", "") or "").strip(),
+                "category": str(item.get("category", "") or "").strip(),
+                "tags": ", ".join(
+                    t.strip()
+                    for t in (item.get("tags") or [])
+                    if t and t.strip()
+                ),
+                "scenes": ", ".join(
+                    s.strip()
+                    for s in (item.get("scenes") or [])
+                    if s and s.strip()
+                ),
+                "scope_mode": str(item.get("scope_mode", "public") or "public").strip(),
+                "origin_target": str(item.get("origin_target", "") or "").strip(),
+                "use_count": int(item.get("use_count", 0) or 0),
+                "thumb_data_uri": self._generate_thumb_uri(
+                    str(item.get("path", "") or ""), thumb_size
+                ),
+            }
+            for item in items
+        ]
+
     async def render_emoji_list_page_file(
         self,
         *,
@@ -1815,28 +1830,7 @@ class ImageProcessorService:
         rendered_items: list[dict] = []
         for item in items:
             pth = str(item.get("path", "") or "")
-            thumb_uri = ""
-            if PILImage is not None:
-                try:
-                    with PILImage.open(pth) as im:
-                        try:
-                            if getattr(im, "is_animated", False):
-                                im.seek(0)
-                        except Exception:
-                            pass
-                        im = im.convert("RGBA")
-                        im.thumbnail((84, 84), LANCZOS or PILImage.BICUBIC)
-                        canvas = PILImage.new("RGBA", (84, 84), (255, 255, 255, 0))
-                        x = (84 - im.size[0]) // 2
-                        y = (84 - im.size[1]) // 2
-                        canvas.paste(im, (x, y), im)
-                        buf = BytesIO()
-                        canvas.save(buf, format="PNG", optimize=True)
-                        thumb_uri = "data:image/png;base64," + base64.b64encode(
-                            buf.getvalue()
-                        ).decode("utf-8")
-                except Exception:
-                    thumb_uri = ""
+            thumb_uri = self._generate_thumb_uri(pth)
 
             rendered_items.append(
                 {
@@ -2046,28 +2040,7 @@ class ImageProcessorService:
         rendered_items: list[dict] = []
         for item in items:
             pth = str(item.get("path", "") or "")
-            thumb_uri = ""
-            if PILImage is not None:
-                try:
-                    with PILImage.open(pth) as im:
-                        try:
-                            if getattr(im, "is_animated", False):
-                                im.seek(0)
-                        except Exception:
-                            pass
-                        im = im.convert("RGBA")
-                        im.thumbnail((84, 84), LANCZOS or PILImage.BICUBIC)
-                        canvas = PILImage.new("RGBA", (84, 84), (255, 255, 255, 0))
-                        x = (84 - im.size[0]) // 2
-                        y = (84 - im.size[1]) // 2
-                        canvas.paste(im, (x, y), im)
-                        buf = BytesIO()
-                        canvas.save(buf, format="PNG", optimize=True)
-                        thumb_uri = "data:image/png;base64," + base64.b64encode(
-                            buf.getvalue()
-                        ).decode("utf-8")
-                except Exception:
-                    thumb_uri = ""
+            thumb_uri = self._generate_thumb_uri(pth)
 
             rendered_items.append(
                 {

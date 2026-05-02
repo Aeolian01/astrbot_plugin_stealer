@@ -184,9 +184,6 @@ class CacheService:
     def get_cache(self, cache_name: str) -> dict[str, Any]:
         return self._get_cache_copy_sync(cache_name)
 
-    def get_index_cache(self) -> dict[str, Any]:
-        return self._get_cache_copy_sync("index_cache")
-
     def get_index_cache_readonly(self) -> dict[str, Any]:
         return self._get_cache_copy_sync("index_cache")
 
@@ -214,13 +211,10 @@ class CacheService:
 
         async def _update_async() -> IndexCache:
             with self._lock:
-                snapshot = copy.deepcopy(
+                current = copy.deepcopy(
                     self._caches.get("index_cache", OrderedDict())
                 )
-                # updater 修改 current，失败时 snapshot 保持不变
-                current = copy.deepcopy(snapshot)
                 result = updater(current)
-                # 支持异步 updater
                 if inspect.isawaitable(result):
                     await result
 
@@ -237,18 +231,6 @@ class CacheService:
         except Exception as e:
             logger.error(f"Failed to update index cache: {e}", exc_info=True)
             return await self.load_index()
-
-    async def update_config(self, max_cache_size: int | None = None) -> None:
-        if max_cache_size is not None:
-            self._CACHE_MAX_SIZE = max_cache_size
-
-            def _clean_all():
-                with self._lock:
-                    for cache_name, cache in self._caches.items():
-                        self._clean_cache(cache_name, cache)
-
-            await asyncio.to_thread(_clean_all)
-            await self.persist_all()
 
     async def persist_all(self) -> None:
         for cache_name in self._caches:

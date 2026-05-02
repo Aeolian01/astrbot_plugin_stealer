@@ -143,13 +143,13 @@
     "description": "发表情白名单",
     "type": "list",
     "default": [],
-    "hint": "格式：group:群号 或 user:QQ号。非空时仅白名单目标可触发发表情"
+    "hint": "格式：group:群号 或 user:QQ号。非空时仅白名单目标可通过"
   },
   "send_target_blacklist": {
     "description": "发表情黑名单",
     "type": "list",
     "default": [],
-    "hint": "格式：group:群号 或 user:QQ号。白名单为空时生效，黑名单目标不触发发表情"
+    "hint": "格式：group:群号 或 user:QQ号。可与白名单同时生效，冲突时按优先级判定"
   },
   "send_target_filter_mode": {
     "description": "发表情名单优先级",
@@ -165,13 +165,13 @@
     "description": "偷表情白名单",
     "type": "list",
     "default": [],
-    "hint": "格式：group:群号 或 user:QQ号。非空时仅白名单目标可触发偷表情"
+    "hint": "格式：group:群号 或 user:QQ号。非空时仅白名单目标可通过"
   },
   "steal_target_blacklist": {
     "description": "偷表情黑名单",
     "type": "list",
     "default": [],
-    "hint": "格式：group:群号 或 user:QQ号。白名单为空时生效，黑名单目标不触发偷表情"
+    "hint": "格式：group:群号 或 user:QQ号。可与白名单同时生效，冲突时按优先级判定"
   },
   "steal_target_filter_mode": {
     "description": "偷表情名单优先级",

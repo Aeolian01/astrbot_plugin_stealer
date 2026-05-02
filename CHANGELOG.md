@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.8] - 2026-05-02
+### improved
+- 哈希查重改用 SQL 直查，不再每次加载全量索引，大幅降低图片处理内存占用
+- WebUI 页面请求优先使用内存缓存，减少数据库全量重建
+- 容量控制循环改用内存缓存代替 DB 重建
+- `update_index` 减少一次冗余 deepcopy
+- VLM 调用修复：删除多余的 `file://` URI 构造和错误回退逻辑
+- `__setattr__` 不再每次属性赋值写盘，改为显式批量保存
+
+### removed
+- 删除 ~900 行无用代码（未调用方法、死参数、死缓存逻辑）
+- 删除重复的 db/cache 索引获取模式，提取为 `_get_index()` 助手方法
+- 删除 `task_scheduler` 中 6 个从未调用的方法
+- 删除 `database_service` 中 11 个从未调用的方法和死缓存逻辑
+- 删除 `command_handler` 中 9 个从未调用的 CRUD 方法
+
+### fixed
+- 修复关键路径裸 `except Exception` 静默吞异常问题
+
 ## [2.5.7] - 2026-04-25
 ### add
 - 新增黑白名单优先级机制：白名单和黑名单可同时启用，通过 `/meme group <send|steal> priority <wl|bl>` 或 WebUI 配置切换冲突时的优先级
