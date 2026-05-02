@@ -39,7 +39,7 @@ try:
     )
 except Exception:
 
-    async def forward_get_cached_image_caption(source: str) -> str:
+    async def forward_get_cached_image_caption(source: Any) -> str:
         return ""
 
 
@@ -790,26 +790,26 @@ class ImageProcessorService:
         else:
             sources = []
 
-        for source in sources:
-            if not source:
-                continue
-            try:
-                caption = await forward_get_cached_image_caption(source)
-            except Exception as e:
-                logger.debug(
-                    "stealer | forward-context caption cache read failed | source=%s error=%s",
-                    source,
-                    e,
-                )
-                continue
-            caption = str(caption or "").strip()
-            if caption:
-                logger.debug(
-                    "stealer | forward-context caption cache hit | source=%s",
-                    source,
-                )
-                extra_meta["forward_context_caption"] = caption
-                return caption
+        sources = [source for source in sources if source]
+        if not sources:
+            return ""
+        try:
+            caption = await forward_get_cached_image_caption(sources)
+        except Exception as e:
+            logger.debug(
+                "stealer | forward-context caption cache read failed | sources=%s error=%s",
+                sources,
+                e,
+            )
+            return ""
+        caption = str(caption or "").strip()
+        if caption:
+            logger.debug(
+                "stealer | forward-context caption cache hit | sources=%s",
+                sources,
+            )
+            extra_meta["forward_context_caption"] = caption
+            return caption
         return ""
 
     async def classify_image(

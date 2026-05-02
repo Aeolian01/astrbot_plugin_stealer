@@ -5,12 +5,73 @@ import tempfile
 import threading
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import aiohttp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Plain
+
+try:
+    from astrbot_plugin_forward_context import (
+        build_image_caption_sources as forward_build_image_caption_sources,
+    )
+except Exception:
+    _VOLATILE_IMAGE_QUERY_KEYS = {"rkey", "ukey", "token", "sig", "sign"}
+
+    def _fallback_url_source_aliases(source: str) -> list[str]:
+        if not source.startswith(("http://", "https://")):
+            return []
+        try:
+            parsed = urlparse(source)
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            aliases: list[str] = []
+            fileid = str(qs.get("fileid", [""])[0] or "").strip()
+            if fileid:
+                aliases.append(f"fileid:{fileid}")
+            for volatile_key in _VOLATILE_IMAGE_QUERY_KEYS:
+                qs.pop(volatile_key, None)
+            normalized_query = urlencode(qs, doseq=True)
+            normalized_url = urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    parsed.params,
+                    normalized_query,
+                    "",
+                )
+            )
+            if normalized_url and normalized_url != source:
+                aliases.append(normalized_url)
+            return aliases
+        except Exception:
+            return []
+
+    def forward_build_image_caption_sources(
+        image_url: str = "",
+        cache_source: str = "",
+        extra_sources: Any = None,
+    ) -> list[str]:
+        sources: list[str] = []
+
+        def add(value: object) -> None:
+            clean = str(value or "").strip()
+            if clean and clean not in sources:
+                sources.append(clean)
+            for alias in _fallback_url_source_aliases(clean):
+                if alias and alias not in sources:
+                    sources.append(alias)
+
+        add(cache_source)
+        add(image_url)
+        if isinstance(extra_sources, (list, tuple, set)):
+            for source in extra_sources:
+                add(source)
+        elif extra_sources:
+            add(extra_sources)
+        return sources
 
 
 class EventHandler:
@@ -100,32 +161,75 @@ class EventHandler:
         data: dict[str, Any] | None = None,
     ) -> list[str]:
         """Build candidate keys shared with forward-context image caption cache."""
-        sources: list[str] = []
+        extra_sources: list[str] = []
 
-        def add(value: object) -> None:
+        def add_extra(value: object) -> None:
             clean = self._normalize_str(value)
-            if clean and clean not in sources:
-                sources.append(clean)
+            if clean and clean not in extra_sources:
+                extra_sources.append(clean)
+
+        def prefixed_fileid(value: object) -> str:
+            clean = self._normalize_str(value)
+            if not clean:
+                return ""
+            return clean if clean.startswith("fileid:") else f"fileid:{clean}"
+
+        def first_from_data(keys: tuple[str, ...]) -> str:
+            if not isinstance(data, dict):
+                return ""
+            for key in keys:
+                clean = self._normalize_str(data.get(key))
+                if clean:
+                    return clean
+            return ""
+
+        image_url = first_from_data(
+            (
+                "url",
+                "image_url",
+                "src",
+                "download_url",
+                "origin_url",
+                "original_url",
+                "raw_url",
+                "cdnurl",
+                "cdn_url",
+            )
+        )
+        fileid_source = prefixed_fileid(first_from_data(("fileid", "file_id")))
+        cache_source = (
+            fileid_source
+            or first_from_data(("file", "url", "image_url", "src", "download_url"))
+        )
 
         if isinstance(data, dict):
-            add(data.get("file"))
-            add(data.get("file_id"))
-            add(data.get("fileid"))
-            add(data.get("url"))
-            add(data.get("image_url"))
-            add(data.get("src"))
-            add(data.get("download_url"))
-            add(data.get("origin_url"))
-            add(data.get("original_url"))
-            add(data.get("raw_url"))
-            add(data.get("cdnurl"))
-            add(data.get("cdn_url"))
+            add_extra(data.get("file"))
+            add_extra(fileid_source)
+            add_extra(data.get("url"))
+            add_extra(data.get("image_url"))
+            add_extra(data.get("src"))
+            add_extra(data.get("download_url"))
+            add_extra(data.get("origin_url"))
+            add_extra(data.get("original_url"))
+            add_extra(data.get("raw_url"))
+            add_extra(data.get("cdnurl"))
+            add_extra(data.get("cdn_url"))
 
         if img is not None:
-            add(getattr(img, "file", ""))
-            add(getattr(img, "url", ""))
+            img_file = self._normalize_str(getattr(img, "file", ""))
+            img_url = self._normalize_str(getattr(img, "url", ""))
+            if not image_url:
+                image_url = img_url or img_file
+            if not cache_source:
+                cache_source = img_file or img_url
+            add_extra(img_file)
+            add_extra(img_url)
 
-        return sources
+        return forward_build_image_caption_sources(
+            image_url=image_url,
+            cache_source=cache_source,
+            extra_sources=extra_sources,
+        )
 
     def _is_telegram_event(self, event: AstrMessageEvent | None = None) -> bool:
         """判断事件是否来自 Telegram 平台。"""
@@ -824,7 +928,11 @@ class EventHandler:
                 if not temp_path:
                     temp_path = await img.convert_to_file_path()
             elif store_urls:
-                extra_meta = {"image_caption_sources": [store_urls[0]]}
+                extra_meta = {
+                    "image_caption_sources": self._image_caption_cache_sources(
+                        data={"url": store_urls[0], "origin_url": store_urls[0]}
+                    )
+                }
                 temp_path, is_gif = await self._download_url_to_temp(store_urls[0])
 
             if not temp_path or not os.path.exists(temp_path):
