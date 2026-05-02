@@ -33,6 +33,19 @@ try:
 except Exception:
     np = None
 
+try:
+    from astrbot_plugin_forward_context import (
+        get_cached_image_caption as forward_get_cached_image_caption,
+    )
+except Exception:
+
+    async def forward_get_cached_image_caption(source: str) -> str:
+        return ""
+
+
+FORWARD_CONTEXT_TEXT_KEY = "_forward_context_text"
+IMAGE_CAPTION_PATTERN = re.compile(r"\[Image:\s*([^\]]+)\]")
+
 
 class ImageProcessorService:
     """图片处理服务类，负责处理所有与图片相关的操作。"""
@@ -352,7 +365,16 @@ class ImageProcessorService:
         if extra_meta and isinstance(extra_meta, dict):
             # Avoid overriding core fields that stealer relies on.
             for k, v in extra_meta.items():
-                if k in {"hash", "category", "created_at", "use_count", "last_used_at"}:
+                if k in {
+                    "hash",
+                    "category",
+                    "created_at",
+                    "use_count",
+                    "last_used_at",
+                    "image_caption_sources",
+                    "forward_context_caption",
+                    "forward_context_image_index",
+                }:
                     continue
                 entry[k] = v
         idx[cat_path] = entry
@@ -439,12 +461,18 @@ class ImageProcessorService:
             # 4. 存入 raw 目录（锁外）
             raw_path = await self._move_to_raw(file_path, hash_val, is_temp)
 
+            caption_hint = await self._get_forward_context_caption_hint(
+                event,
+                extra_meta,
+            )
+
             # 5. VLM 分类（锁外，耗时操作）
             category, tags, desc, emotion, scenes = await self.classify_image(
                 event=event,
                 file_path=raw_path,
                 categories=categories,
                 content_filtration=content_filtration,
+                caption_hint=caption_hint,
             )
 
             # 6. 缓存结果（锁外）
@@ -693,6 +721,110 @@ class ImageProcessorService:
             return "\n".join(lines)
         return ", ".join(categories)
 
+    @staticmethod
+    def _get_event_extra_value(
+        event: AstrMessageEvent | None,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        if event is None:
+            return default
+        try:
+            getter = getattr(event, "get_extra", None)
+            if callable(getter):
+                try:
+                    return getter(key, default)
+                except TypeError:
+                    value = getter(key)
+                    return default if value is None else value
+        except Exception:
+            pass
+        extra = getattr(event, "extra", None)
+        if isinstance(extra, dict):
+            return extra.get(key, default)
+        return default
+
+    def _get_forward_context_event_caption(
+        self,
+        event: AstrMessageEvent | None,
+        extra_meta: dict[str, Any],
+    ) -> str:
+        text = str(
+            self._get_event_extra_value(event, FORWARD_CONTEXT_TEXT_KEY, "") or ""
+        ).strip()
+        if not text:
+            return ""
+
+        captions = [
+            match.group(1).strip()
+            for match in IMAGE_CAPTION_PATTERN.finditer(text)
+            if match.group(1).strip()
+        ]
+        if not captions:
+            return ""
+
+        try:
+            image_index = int(extra_meta.get("forward_context_image_index") or 0)
+        except Exception:
+            image_index = 0
+        if image_index < 0 or image_index >= len(captions):
+            image_index = 0
+
+        caption = captions[image_index]
+        extra_meta["forward_context_caption"] = caption
+        logger.debug(
+            "stealer | forward-context event caption hit | image_index=%s caption_len=%s",
+            image_index + 1,
+            len(caption),
+        )
+        return caption
+
+    async def _get_forward_context_caption_hint(
+        self,
+        event: AstrMessageEvent | None,
+        extra_meta: dict[str, Any] | None,
+    ) -> str:
+        if not isinstance(extra_meta, dict):
+            return ""
+
+        existing_caption = str(extra_meta.get("forward_context_caption") or "").strip()
+        if existing_caption:
+            return existing_caption
+
+        event_caption = self._get_forward_context_event_caption(event, extra_meta)
+        if event_caption:
+            return event_caption
+
+        raw_sources = extra_meta.get("image_caption_sources")
+        if isinstance(raw_sources, str):
+            sources = [raw_sources]
+        elif isinstance(raw_sources, list):
+            sources = [str(source or "").strip() for source in raw_sources]
+        else:
+            sources = []
+
+        for source in sources:
+            if not source:
+                continue
+            try:
+                caption = await forward_get_cached_image_caption(source)
+            except Exception as e:
+                logger.debug(
+                    "stealer | forward-context caption cache read failed | source=%s error=%s",
+                    source,
+                    e,
+                )
+                continue
+            caption = str(caption or "").strip()
+            if caption:
+                logger.debug(
+                    "stealer | forward-context caption cache hit | source=%s",
+                    source,
+                )
+                extra_meta["forward_context_caption"] = caption
+                return caption
+        return ""
+
     async def classify_image(
         self,
         event: AstrMessageEvent | None,
@@ -700,6 +832,7 @@ class ImageProcessorService:
         categories=None,
         backend_tag=None,
         content_filtration=None,
+        caption_hint: str = "",
     ) -> tuple[str, list[str], str, str, list[str]]:
         """使用视觉模型对图片进行分类并返回详细信息。
 
@@ -741,8 +874,16 @@ class ImageProcessorService:
             )
             prompt = self._render_prompt_template(prompt_template, emotion_list_str)
 
-            # 调用视觉模型
-            response = await self._call_vision_model(event, file_path, prompt)
+            caption_hint = str(caption_hint or "").strip()
+            if caption_hint and not should_filter:
+                response = await self._call_text_model_for_caption(
+                    event,
+                    prompt,
+                    caption_hint,
+                )
+            else:
+                # 调用视觉模型
+                response = await self._call_vision_model(event, file_path, prompt)
 
             # 解析JSON响应
             return self._parse_classification_response(response, file_path)
@@ -858,6 +999,41 @@ class ImageProcessorService:
                 return parsed
 
         return None
+
+    async def _call_text_model_for_caption(
+        self,
+        event: AstrMessageEvent | None,
+        prompt: str,
+        caption: str,
+    ) -> str:
+        provider_id = await self._resolve_vision_provider(event)
+        if not provider_id:
+            raise ValueError(
+                "未配置视觉模型(vision_provider_id)，无法根据图片描述分类。"
+            )
+
+        text_prompt = (
+            f"{prompt}\n\n"
+            "<image_caption>\n"
+            f"{caption}\n"
+            "</image_caption>\n\n"
+            "请只根据上面的图片描述完成表情包分类，仍然只输出 JSON。"
+        )
+        logger.debug(
+            "stealer | classify from forward-context caption | provider=%s caption_len=%s",
+            provider_id,
+            len(caption),
+        )
+        result = await self.plugin.context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=text_prompt,
+            max_tokens=300,
+        )
+        text = (result.completion_text or "").strip() if result else ""
+        if not text:
+            raise Exception("文本分类模型返回空响应")
+        logger.debug(f"stealer | caption classification response: {text[:200]}")
+        return text
 
     @staticmethod
     def _is_file_not_found_error(error: Exception) -> bool:

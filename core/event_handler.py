@@ -94,6 +94,39 @@ class EventHandler:
 
         return ""
 
+    def _image_caption_cache_sources(
+        self,
+        img: Image | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Build candidate keys shared with forward-context image caption cache."""
+        sources: list[str] = []
+
+        def add(value: object) -> None:
+            clean = self._normalize_str(value)
+            if clean and clean not in sources:
+                sources.append(clean)
+
+        if isinstance(data, dict):
+            add(data.get("file"))
+            add(data.get("file_id"))
+            add(data.get("fileid"))
+            add(data.get("url"))
+            add(data.get("image_url"))
+            add(data.get("src"))
+            add(data.get("download_url"))
+            add(data.get("origin_url"))
+            add(data.get("original_url"))
+            add(data.get("raw_url"))
+            add(data.get("cdnurl"))
+            add(data.get("cdn_url"))
+
+        if img is not None:
+            add(getattr(img, "file", ""))
+            add(getattr(img, "url", ""))
+
+        return sources
+
     def _is_telegram_event(self, event: AstrMessageEvent | None = None) -> bool:
         """判断事件是否来自 Telegram 平台。"""
         platform_name = self._get_event_platform_name(event)
@@ -535,13 +568,19 @@ class EventHandler:
             try:
                 temp_path: str | None = None
                 is_gif = False
+                extra_meta: dict[str, Any] = {}
 
                 if imgs:
                     img = imgs[0]
+                    extra_meta = {
+                        "image_caption_sources": self._image_caption_cache_sources(img),
+                        "forward_context_image_index": 0,
+                    }
                     temp_path, is_gif = await self._download_original_image(img)
                     if not temp_path:
                         temp_path = await img.convert_to_file_path()
                 elif store_urls:
+                    extra_meta = {"image_caption_sources": [store_urls[0]]}
                     temp_path, is_gif = await self._download_url_to_temp(store_urls[0])
 
                 if not temp_path or not os.path.exists(temp_path):
@@ -550,7 +589,11 @@ class EventHandler:
                     )
                 else:
                     success, idx = await plugin_instance._process_image(
-                        event, temp_path, is_temp=True, is_platform_emoji=True
+                        event,
+                        temp_path,
+                        is_temp=True,
+                        is_platform_emoji=True,
+                        extra_meta=extra_meta,
                     )
                     if success and idx:
                         await plugin_instance._save_index(idx)
@@ -653,6 +696,7 @@ class EventHandler:
                 try:
                     seg = raw_image_segments[i] if 0 <= i < len(raw_image_segments) else None
                     data = seg.get("data", {}) if isinstance(seg, dict) else {}
+                    caption_sources = self._image_caption_cache_sources(img, data)
                     if isinstance(data, dict) and (data.get("emoji_id") or data.get("emoji_package_id")):
                         extra_meta = {
                             "source": "qq_store",
@@ -661,8 +705,20 @@ class EventHandler:
                             "origin_url": self._normalize_str(data.get("url", "")),
                             "qq_key": self._normalize_str(data.get("key", "")),
                         }
+                    if caption_sources:
+                        if extra_meta is None:
+                            extra_meta = {}
+                        extra_meta["image_caption_sources"] = caption_sources
+                    if extra_meta is None:
+                        extra_meta = {}
+                    extra_meta["forward_context_image_index"] = i
                 except Exception:
-                    extra_meta = None
+                    if extra_meta is None:
+                        extra_meta = {}
+                    caption_sources = self._image_caption_cache_sources(img)
+                    if caption_sources:
+                        extra_meta["image_caption_sources"] = caption_sources
+                    extra_meta["forward_context_image_index"] = i
 
                 if origin_target_str:
                     if extra_meta is None:
@@ -762,6 +818,11 @@ class EventHandler:
                 extra_meta = {"source": "qq_store", "origin_url": self._normalize_str(url)}
                 if origin_target_str:
                     extra_meta["origin_target"] = origin_target_str
+                caption_sources = self._image_caption_cache_sources(
+                    data={"url": url, "origin_url": url}
+                )
+                if caption_sources:
+                    extra_meta["image_caption_sources"] = caption_sources
                 store_process_tasks.append(
                     plugin_instance._process_image(
                         event,
