@@ -159,6 +159,41 @@ class Main(Star):
     def _emoji_turn_state(self, event: AstrMessageEvent) -> _EmojiTurnState:
         return _EmojiTurnState(event)
 
+    @staticmethod
+    def _is_action_only_text(text: str) -> bool:
+        normalized = re.sub(r"\s+", "", str(text or "").strip())
+        if not normalized:
+            return False
+        return bool(
+            re.fullmatch(r"\[戳一戳(?::[^\]]*)?\]", normalized)
+            or re.fullmatch(
+                r"\[(?:poke|nudge)(?::[^\]]*)?\]", normalized, re.IGNORECASE
+            )
+        )
+
+    def _is_action_only_event(self, event: AstrMessageEvent) -> bool:
+        text_candidates = [
+            str(getattr(event, "message_str", "") or "").strip(),
+            str(
+                getattr(getattr(event, "message_obj", None), "message_str", "") or ""
+            ).strip(),
+            str(
+                getattr(getattr(event, "message_obj", None), "raw_message", "") or ""
+            ).strip(),
+        ]
+        if any(self._is_action_only_text(text) for text in text_candidates if text):
+            return True
+
+        try:
+            message_chain = list(event.get_messages() or [])
+        except Exception:
+            message_chain = []
+        if not message_chain:
+            return False
+        return all(
+            type(comp).__name__.strip().lower() == "poke" for comp in message_chain
+        )
+
     def _load_vision_provider_id(self) -> str:
         """加载视觉模型提供商ID。
 
