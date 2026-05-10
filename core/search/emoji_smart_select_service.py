@@ -13,30 +13,21 @@ from .text_similarity import calculate_hybrid_similarity, tokenize_for_bm25, _ex
 class EmojiSmartSelectService:
     """负责智能选择表情包。"""
 
+    # 从 EmojiSelector 同步的常量（供内部方法直接使用，避免通过 _selector 委托）
+    SMART_FAST_PREFILTER_MIN_CANDIDATES = 48
+    SMART_FAST_PREFILTER_TOP_K = 120
+    SMART_FAST_PREFILTER_FUZZY_RESERVE = 24
+    SMART_BM25_BONUS_WEIGHT = 0.2
+
     def __init__(self, plugin_instance: Any = None) -> None:
         self.plugin = plugin_instance
         self._selector = None
         self._search_engine = None
 
     def __getattr__(self, name: str):
-        """向后兼容：将缺失的方法委托给 EmojiSelector。"""
-        if name in (
-            "_get_index",
-            "_check_group_allowed",
-            "record_emoji_usage",
-            "normalize_category",
-            "_canon_path",
-            "_get_recent_usage",
-            "_set_recent_usage",
-            "_update_recent_usage",
-            "_calculate_recent_penalty",
-            "_get_candidate_categories",
-            "_get_category_from_data",
-            "_is_entry_allowed_for_event",
-            "_prepare_entry_text_features",
-        ):
-            if self._selector is not None:
-                return getattr(self._selector, name)
+        """将缺失的属性/方法委托给 EmojiSelector。"""
+        if self._selector is not None:
+            return getattr(self._selector, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     async def _select_emoji_smart_impl(
@@ -599,7 +590,7 @@ class EmojiSmartSelectService:
 
         # 遍历情绪列表，第一个能选到表情包的就发送
         for emotion in emotions:
-            emoji_path = await self.select_emoji(emotion, cleaned_text, event=event)
+            emoji_path = await self.plugin.emoji_selector.select_emoji(emotion, cleaned_text, event=event)
             if emoji_path:
                 await self.send_emoji_with_text(event, emoji_path, cleaned_text)
                 logger.debug(f"已发送表情包 (情绪={emotion})")

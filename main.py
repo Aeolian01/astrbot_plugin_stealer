@@ -911,7 +911,7 @@ class Main(Star):
         if not result.is_llm_result():
             return False
         turn_state = self._emoji_turn_state(event)
-        if turn_state.is_active_sent():
+        if turn_state.is_active_sent() or turn_state.is_auto_claimed():
             text = result.get_plain_text() or ""
             if text.strip():
                 _, cleaned_text = await self._extract_emotions_from_text(event, text)
@@ -942,8 +942,13 @@ class Main(Star):
             return False
         if not self._claim_auto_emoji_turn(event):
             return False
+        user_query = ""
+        try:
+            user_query = event.get_message_str() or ""
+        except Exception:
+            pass
         self._safe_create_task(
-            self._async_analyze_and_send_emoji(event, text_without_explicit, []),
+            self._async_analyze_and_send_emoji(event, text_without_explicit, [], user_query=user_query),
             name="emoji_analyze_passive",
         )
         return True

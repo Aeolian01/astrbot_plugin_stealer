@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-05-11
+
+### fix
+- 修复 `claim_auto_emoji_turn` 提前设置 `_active_sent`，导致 `EmojiSmartSelectService.try_send_emoji` 误判已发送而跳过自动发送
+- 修复 `EmojiSmartSelectService.try_send_emoji` 调用 `self.select_emoji()` 不存在，改为 `self.plugin.emoji_selector.select_emoji()`
+- 修复 `EmojiSmartSelectService` 缺失 `SMART_FAST_PREFILTER_*` 和 `SMART_BM25_*` 类常量
+- 修复 `EmojiSmartSelectService.__getattr__` 白名单过窄，缺失 `_recent_usage` 等多个委托属性；改为通用委托
+- 修复 `async_analyze_and_send_emoji` 未接入 `SmartEmotionMatcher.analyze_and_match_emotion`，自然情绪分析功能无效
+- 修复 `_prepare_emoji_response` 未传入 `user_query`，自然情绪分析器缺少 QA 上下文
+
 ## [2.6.1] - 2026-05-11
 
 ### fix

@@ -198,7 +198,7 @@ class EmojiSenderEngine:
             return True
         if turn_state.is_active_sent():
             return False
-        turn_state.mark_active_sent()
+        turn_state._auto_send_claimed = True
         event.set_extra("stealer_auto_emoji_turn_claimed", True)
         return True
 
@@ -284,11 +284,23 @@ class EmojiSenderEngine:
     ):
         """异步分析并发送表情包。
 
-        注意：调用方 _prepare_emoji_response 已通过 claim_auto_emoji_turn
-        设置 _active_sent，防止重复创建任务。本方法不再重复检查 is_active_sent，
-        直接尝试发送，成功后再标记 mark_active_sent 以记录实际发送时间。
+        调用方 _prepare_emoji_response 已通过 claim_auto_emoji_turn
+        占用发送权（_auto_send_claimed），防止重复创建任务。
+        本方法成功发送后再标记 mark_active_sent 以记录实际发送时间。
         """
         try:
+            # 无显式情绪且开启自然语言分析时，用小模型分析回复文本的情绪
+            if (
+                not emotions
+                and getattr(self.plugin, "enable_natural_emotion_analysis", False)
+                and hasattr(self.plugin, "smart_emotion_matcher")
+            ):
+                analyzed = await self.plugin.smart_emotion_matcher.analyze_and_match_emotion(
+                    event, text, user_query=user_query
+                )
+                if analyzed:
+                    emotions = [analyzed]
+
             sent = await self.try_send_emoji(event, emotions, text)
             if sent:
                 await self.mark_auto_emoji_sent(event)
