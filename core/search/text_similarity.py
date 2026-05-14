@@ -59,9 +59,7 @@ class BM25:
         for word, freq_list in nd.items():
             df = len(freq_list)
             self.doc_freqs[word] = df
-            self.idf[word] = math.log(
-                (self.corpus_size - df + 0.5) / (df + 0.5) + 1
-            )
+            self.idf[word] = math.log((self.corpus_size - df + 0.5) / (df + 0.5) + 1)
 
     def get_scores(self, query: list[str]) -> list[float]:
         scores = [0.0] * self.corpus_size
@@ -371,11 +369,7 @@ def _calculate_hybrid_similarity_cached(t1: str, t2: str) -> float:
     # ---- 融合（优化权重：降低子串权重，提高编辑距离权重）----
     # 针对情绪词匹配场景优化：短词编辑距离更重要，子串容易因否定词误判
     score = (
-        ngram_sim * 0.28
-        + cosine_sim * 0.25
-        + substr_sim * 0.12
-        + char_sim * 0.08
-        + edit_sim * 0.27
+        ngram_sim * 0.28 + cosine_sim * 0.25 + substr_sim * 0.12 + char_sim * 0.08 + edit_sim * 0.27
     )
 
     # 关键词重合增强：对中文 bigram 命中进行轻微提升
@@ -599,6 +593,7 @@ def _levenshtein_distance(s1: str, s2: str) -> int:
         previous_row = current_row
 
     return previous_row[-1]
+
 
 @lru_cache(maxsize=8192)
 def _extract_chinese_chars(text: str) -> frozenset[str]:

@@ -62,3 +62,28 @@ if importlib.util.find_spec("astrbot") is None:
             "astrbot.api.message_components": components_mod,
         }
     )
+
+if importlib.util.find_spec("aiohttp") is None:
+    aiohttp_mod = types.ModuleType("aiohttp")
+
+    class ClientSession:
+        closed = True
+
+        async def close(self) -> None:
+            pass
+
+        def get(self, *args, **kwargs):
+            raise RuntimeError("aiohttp is not available in tests")
+
+    class TCPConnector:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class ClientTimeout:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    aiohttp_mod.ClientSession = ClientSession
+    aiohttp_mod.TCPConnector = TCPConnector
+    aiohttp_mod.ClientTimeout = ClientTimeout
+    sys.modules["aiohttp"] = aiohttp_mod

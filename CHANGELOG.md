@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.3] - 2026-05-11
+
+### added
+- LLM 自主偷取功能：新增 `steal_sticker` LLM tool，bot 可在私聊/群聊中自主偷取图片入库
+- 偷取统一走 VLM 自动分析路线，入库后回传分类/标签/描述/场景结果给 LLM
+- 新增 `steal_by_llm` 配置项，控制 LLM 自主偷取开关
+- `on_llm_request` 注入偷取指引，包含分类库存提示和使用时机
+
+### fix
+- 补回 `resolve_auto_emoji_turn_permission` 丢失的 debug 日志（重构遗漏）
+- 修复 `steal_image_direct` 空索引覆盖全库的 bug
+
+## [2.6.2] - 2026-05-11
+
+### fix
+- 修复 `claim_auto_emoji_turn` 提前设置 `_active_sent`，导致 `EmojiSmartSelectService.try_send_emoji` 误判已发送而跳过自动发送
+- 修复 `EmojiSmartSelectService.try_send_emoji` 调用 `self.select_emoji()` 不存在，改为 `self.plugin.emoji_selector.select_emoji()`
+- 修复 `EmojiSmartSelectService` 缺失 `SMART_FAST_PREFILTER_*` 和 `SMART_BM25_*` 类常量
+- 修复 `EmojiSmartSelectService.__getattr__` 白名单过窄，缺失 `_recent_usage` 等多个委托属性；改为通用委托
+- 修复 `async_analyze_and_send_emoji` 未接入 `SmartEmotionMatcher.analyze_and_match_emotion`，自然情绪分析功能无效
+- 修复 `_prepare_emoji_response` 未传入 `user_query`，自然情绪分析器缺少 QA 上下文
+
+## [2.6.1] - 2026-05-11
+
+### fix
+- 修复 `_enforce_capacity` 方法名不匹配：重构时误改名为 `_enforce_capacity_sync`，导致容量控制循环崩溃
+- 修复 `_clean_raw_directory` 方法缺失：Phase 4 拆分时被误删，导致 raw 目录定时清理失败
+- 修复 `send_emoji_by_id` 工具消息乱码：编码损坏导致用户可见文本变乱码
+- 修复 `calculate_hybrid_similarity` 导入缺失：`emoji_smart_select_service.py` 未导入该函数
+- 修复 `PHashDedupService` 类名引用错误：未导入直接使用类名
+- 修复 `LANCZOS` 常量引用错误：Pillow 新版移除该常量，改为 `PILImage.LANCZOS`
+- 清理所有未使用的 import 和冗余代码
+
+### changed
+- `image_mgmt_command.py`：list 命令改用数据库分页查询，limit 上限提升至 100
+- `plugin_api.py`：补充 list 接口的数据库分页路径与分类统计口径对齐
+
+## [2.6.0] - 2026-05-09
+
+### changed
+- WebUI 迁移至 AstrBot Pages 系统，删除独立 WebServer
+- PluginAPI 重写，handler 直接实现消除委托链
+- `core/` 拆分 6 子目录，按职责分离 15 个子服务
+
+### fix
+- 修复 iframe 沙箱拦截 `confirm`/`alert` 导致操作不可用
+- 补回重构丢失的 `initialize`、hook、辅助方法等
+- 修复 VLM 调用链、子服务委托缺失、导入缺失等重构问题
+
+### removed
+- 删除 `api/` 旧 handler 委托层，逻辑合并到 `plugin_api.py`
+
 ## [2.5.8] - 2026-05-02
 ### improved
 - 哈希查重改用 SQL 直查，不再每次加载全量索引，大幅降低图片处理内存占用

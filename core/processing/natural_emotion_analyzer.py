@@ -12,7 +12,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
-from .text_similarity import calculate_hybrid_similarity, _has_negation_prefix
+from ..search.text_similarity import calculate_hybrid_similarity, _has_negation_prefix
 
 
 class NaturalEmotionAnalyzer:
@@ -114,16 +114,15 @@ class NaturalEmotionAnalyzer:
             categories_desc = {key: key for key in self.categories}
 
         return ", ".join(
-            [
-                f"{key}({desc})"
-                for key, desc in categories_desc.items()
-                if key in self.categories
-            ]
+            [f"{key}({desc})" for key, desc in categories_desc.items() if key in self.categories]
         )
 
     async def analyze_emotion(
-        self, event: AstrMessageEvent, text: str,
-        *, user_query: str = "",
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        user_query: str = "",
     ) -> str | None:
         """分析文本的自然情绪
 
@@ -186,9 +185,7 @@ class NaturalEmotionAnalyzer:
         if emotion:
             async with self._cache_lock:
                 self._cache_result(cache_key, emotion)
-            logger.info(
-                f"[情绪分析] {cleaned_text[:30]}... → {emotion} ({response_time:.0f}ms)"
-            )
+            logger.info(f"[情绪分析] {cleaned_text[:30]}... → {emotion} ({response_time:.0f}ms)")
         else:
             logger.warning(f"[情绪分析] 分析失败: {cleaned_text[:30]}...")
 
@@ -230,14 +227,13 @@ class NaturalEmotionAnalyzer:
         if fallback:
             # 检查文本中是否有否定词+关键词的组合（语义反转）
             has_negated_emotion = any(
-                _has_negation_prefix(text_lower, keyword)
-                for keyword in keyword_map.keys()
+                _has_negation_prefix(text_lower, keyword) for keyword in keyword_map.keys()
             )
-            
+
             # 如果存在否定词反转语义，不进行降级匹配
             if has_negated_emotion:
                 return None
-            
+
             best_match = None
             best_score = 0.0
             threshold = 0.3  # 降级模式阈值更低
@@ -260,8 +256,11 @@ class NaturalEmotionAnalyzer:
         return None
 
     async def _analyze_with_llm(
-        self, event: AstrMessageEvent, text: str,
-        *, user_query: str = "",
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        user_query: str = "",
     ) -> str | None:
         """使用小模型分析情绪
 
@@ -280,7 +279,8 @@ class NaturalEmotionAnalyzer:
             # 构建提示词：有用户问题时使用 QA 模板，否则使用纯文本模板
             if user_query:
                 prompt = self.emotion_analysis_qa_prompt.format(
-                    user_query=user_query, text=text,
+                    user_query=user_query,
+                    text=text,
                 )
                 logger.debug(f"[情绪分析] 使用QA模板，Q={user_query[:30]}...")
             else:
@@ -379,7 +379,9 @@ class NaturalEmotionAnalyzer:
         # 优先匹配完整的单词（避免部分匹配如 "sad" 匹配到 "sadness"）
         for category in self.categories:
             # 检查是否是完整单词匹配（前后是边界或标点）
-            pattern = r'(?:^|[\s:：,，.。!！?？])' + re.escape(category) + r'(?:$|[\s:：,，.。!！?？])'
+            pattern = (
+                r"(?:^|[\s:：,，.。!！?？])" + re.escape(category) + r"(?:$|[\s:：,，.。!！?？])"
+            )
             if re.search(pattern, result, re.IGNORECASE):
                 logger.debug(f"[情绪分析] 从文本中提取分类: '{result}' -> '{category}'")
                 return category
@@ -421,9 +423,7 @@ class NaturalEmotionAnalyzer:
         # 更新平均响应时间
         total = self.stats["total_analyses"]
         current_avg = self.stats["avg_response_time"]
-        self.stats["avg_response_time"] = (
-            current_avg * (total - 1) + response_time
-        ) / total
+        self.stats["avg_response_time"] = (current_avg * (total - 1) + response_time) / total
 
         if success:
             self.stats["successful_analyses"] += 1
@@ -437,9 +437,7 @@ class NaturalEmotionAnalyzer:
             return {"message": "暂无分析数据"}
 
         cache_hit_rate = (cache_hits / grand_total) * 100
-        success_rate = (
-            (self.stats["successful_analyses"] / total) * 100 if total > 0 else 0.0
-        )
+        success_rate = (self.stats["successful_analyses"] / total) * 100 if total > 0 else 0.0
 
         return {
             "total_analyses": grand_total,
@@ -464,9 +462,12 @@ class SmartEmotionMatcher:
         self.natural_analyzer = NaturalEmotionAnalyzer(plugin_instance)
 
     async def analyze_and_match_emotion(
-        self, event: AstrMessageEvent, text: str,
+        self,
+        event: AstrMessageEvent,
+        text: str,
         use_natural_analysis: bool = True,
-        *, user_query: str = "",
+        *,
+        user_query: str = "",
     ) -> str | None:
         """分析并匹配情绪
 
@@ -485,7 +486,9 @@ class SmartEmotionMatcher:
         # 使用自然语言分析（主要方案）
         if use_natural_analysis and self.plugin.enable_natural_emotion_analysis:
             emotion = await self.natural_analyzer.analyze_emotion(
-                event, text, user_query=user_query,
+                event,
+                text,
+                user_query=user_query,
             )
             if emotion:
                 return emotion

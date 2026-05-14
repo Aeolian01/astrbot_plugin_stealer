@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from core.event_handler import EventHandler
-from core.image_processor_service import ImageProcessorService
-import core.image_processor_service as image_processor_module
+from core.events.event_handler import EventHandler
+from core.processing.image_processor_service import ImageProcessorService
+import core.processing.image_processor_service as image_processor_module
 
 
 class _Image:
@@ -14,7 +14,7 @@ class _Image:
 
 
 def test_image_caption_sources_use_forward_context_alias_rules() -> None:
-    handler = EventHandler.__new__(EventHandler)
+    handler = EventHandler(None)
 
     sources = handler._image_caption_cache_sources(
         _Image(file="image.png", url="https://example.com/component?fileid=abc&rkey=temp"),

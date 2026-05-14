@@ -12,7 +12,7 @@ from astrbot.api.star import Context, StarTools
 class WebuiConfig(BaseModel):
     enabled: bool = False
     host: str = "0.0.0.0"
-    port: int = 9191  
+    port: int = 9191
     auth_enabled: bool = True
     password: str = ""
     session_timeout: int = 3600
@@ -52,6 +52,7 @@ class PluginConfig(BaseModel):
     enable_natural_emotion_analysis: bool = True  # 情绪识别模式
     emotion_analysis_provider_id: str = ""  # 情绪分析专用模型
     smart_emoji_selection: bool = True  # 智能表情包选择
+    steal_by_llm: bool = False  # LLM 自主偷取
 
     # === 自定义提示词 ===
     custom_emoji_classification_prompt: str = ""
@@ -372,26 +373,14 @@ class PluginConfig(BaseModel):
             "_target_policy_cache",
             {
                 "send": {
-                    "whitelist": self._normalize_target_collection(
-                        self.send_target_whitelist
-                    ),
-                    "blacklist": self._normalize_target_collection(
-                        self.send_target_blacklist
-                    ),
-                    "mode": self._normalize_filter_mode(
-                        self.send_target_filter_mode
-                    ),
+                    "whitelist": self._normalize_target_collection(self.send_target_whitelist),
+                    "blacklist": self._normalize_target_collection(self.send_target_blacklist),
+                    "mode": self._normalize_filter_mode(self.send_target_filter_mode),
                 },
                 "steal": {
-                    "whitelist": self._normalize_target_collection(
-                        self.steal_target_whitelist
-                    ),
-                    "blacklist": self._normalize_target_collection(
-                        self.steal_target_blacklist
-                    ),
-                    "mode": self._normalize_filter_mode(
-                        self.steal_target_filter_mode
-                    ),
+                    "whitelist": self._normalize_target_collection(self.steal_target_whitelist),
+                    "blacklist": self._normalize_target_collection(self.steal_target_blacklist),
+                    "mode": self._normalize_filter_mode(self.steal_target_filter_mode),
                 },
             },
         )
@@ -459,9 +448,7 @@ class PluginConfig(BaseModel):
             dict: 包含两个提示词的字典
         """
         custom_prompt = getattr(self, "custom_emoji_classification_prompt", "")
-        custom_filter_prompt = getattr(
-            self, "custom_emoji_classification_with_filter_prompt", ""
-        )
+        custom_filter_prompt = getattr(self, "custom_emoji_classification_with_filter_prompt", "")
 
         result = {
             "emoji_classification_prompt": "",
@@ -633,9 +620,7 @@ class PluginConfig(BaseModel):
 
         return self._is_normalized_targets_allowed(action, normalized_targets)
 
-    def _is_normalized_targets_allowed(
-        self, action: str, normalized_targets: list[str]
-    ) -> bool:
+    def _is_normalized_targets_allowed(self, action: str, normalized_targets: list[str]) -> bool:
         if not normalized_targets:
             return True
 

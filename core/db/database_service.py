@@ -35,6 +35,7 @@ class DatabaseService:
         """
         if db_path is None:
             from astrbot.api.star import StarTools
+
             db_path = Path(StarTools.get_data_dir("astrbot_plugin_stealer")) / "emoji.db"
 
         self._db_path = Path(db_path)
@@ -87,9 +88,7 @@ class DatabaseService:
             """)
 
             # 检查 schema 版本
-            result = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
+            result = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
             current_version = int(result["value"] if result else 0)
 
             if current_version < self.SCHEMA_VERSION:
@@ -97,7 +96,7 @@ class DatabaseService:
                 self._create_tables(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
-                    (str(self.SCHEMA_VERSION),)
+                    (str(self.SCHEMA_VERSION),),
                 )
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
@@ -186,9 +185,7 @@ class DatabaseService:
                 related_map[row["path"]].append(row[value_column])
         return related_map
 
-    def _build_search_signature_from_index(
-        self, idx: dict[str, dict[str, Any]]
-    ) -> str:
+    def _build_search_signature_from_index(self, idx: dict[str, dict[str, Any]]) -> str:
         if not idx:
             return "empty"
 
@@ -202,9 +199,7 @@ class DatabaseService:
             desc = str(data.get("desc", "") or "")
             tags = self._normalize_multi_value(data.get("tags", []))
             scenes = self._normalize_multi_value(data.get("scenes", []))
-            payload = "\x1f".join(
-                [path, category, desc, "\x1e".join(tags), "\x1e".join(scenes)]
-            )
+            payload = "\x1f".join([path, category, desc, "\x1e".join(tags), "\x1e".join(scenes)])
             hasher.update(payload.encode("utf-8", errors="ignore"))
             hasher.update(b"\x00")
         return hasher.hexdigest()
@@ -214,9 +209,7 @@ class DatabaseService:
     def get_emoji(self, path: str) -> dict[str, Any] | None:
         """获取单个表情包的完整信息。"""
         with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM emoji WHERE path = ?", (path,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM emoji WHERE path = ?", (path,)).fetchone()
             if not row:
                 return None
 
@@ -244,9 +237,7 @@ class DatabaseService:
     def hash_exists(self, hash_val: str) -> bool:
         """O(1) 哈希查重，不走全量索引加载。"""
         with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM emoji WHERE hash = ? LIMIT 1", (hash_val,)
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM emoji WHERE hash = ? LIMIT 1", (hash_val,)).fetchone()
             return row is not None
 
     def get_phash_map(self) -> dict[str, str]:
@@ -269,7 +260,7 @@ class DatabaseService:
         with self._get_connection() as conn:
             conn.execute(
                 "UPDATE emoji SET use_count = use_count + 1, last_used_at = ? WHERE path = ?",
-                (now, path)
+                (now, path),
             )
 
     # ── 批量操作 ──
@@ -309,24 +300,27 @@ class DatabaseService:
                         continue
 
                     # 插入主记录
-                    conn.execute("""
+                    conn.execute(
+                        """
                         INSERT OR REPLACE INTO emoji
                         (path, hash, phash, category, desc, source, origin_target,
                          scope_mode, created_at, use_count, last_used_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        path,
-                        emoji.get("hash", ""),
-                        emoji.get("phash"),
-                        emoji.get("category", "unknown"),
-                        emoji.get("desc"),
-                        emoji.get("source"),
-                        emoji.get("origin_target"),
-                        emoji.get("scope_mode", "public"),
-                        emoji.get("created_at", now),
-                        emoji.get("use_count", 0),
-                        emoji.get("last_used_at", 0),
-                    ))
+                    """,
+                        (
+                            path,
+                            emoji.get("hash", ""),
+                            emoji.get("phash"),
+                            emoji.get("category", "unknown"),
+                            emoji.get("desc"),
+                            emoji.get("source"),
+                            emoji.get("origin_target"),
+                            emoji.get("scope_mode", "public"),
+                            emoji.get("created_at", now),
+                            emoji.get("use_count", 0),
+                            emoji.get("last_used_at", 0),
+                        ),
+                    )
 
                     # 删除旧标签/场景
                     conn.execute("DELETE FROM emoji_tag WHERE path = ?", (path,))
@@ -336,16 +330,14 @@ class DatabaseService:
                     for tag in emoji.get("tags") or []:
                         if tag:
                             conn.execute(
-                                "INSERT INTO emoji_tag (path, tag) VALUES (?, ?)",
-                                (path, tag)
+                                "INSERT INTO emoji_tag (path, tag) VALUES (?, ?)", (path, tag)
                             )
 
                     # 插入场景
                     for scene in emoji.get("scenes") or []:
                         if scene:
                             conn.execute(
-                                "INSERT INTO emoji_scene (path, scene) VALUES (?, ?)",
-                                (path, scene)
+                                "INSERT INTO emoji_scene (path, scene) VALUES (?, ?)", (path, scene)
                             )
 
                     count += 1
@@ -537,9 +529,7 @@ class DatabaseService:
                                 )
 
                     if "scenes" in meta:
-                        desired_scenes = [
-                            scene for scene in (meta.get("scenes") or []) if scene
-                        ]
+                        desired_scenes = [scene for scene in (meta.get("scenes") or []) if scene]
                         if desired_scenes != (current.get("scenes") or []):
                             conn.execute("DELETE FROM emoji_scene WHERE path = ?", (path,))
                             for scene in desired_scenes:
@@ -694,9 +684,7 @@ class DatabaseService:
 
             # scope 过滤
             if scope_target:
-                where_clauses.append(
-                    "(e.scope_mode = 'public' OR e.origin_target = ?)"
-                )
+                where_clauses.append("(e.scope_mode = 'public' OR e.origin_target = ?)")
                 params.append(scope_target)
                 category_count_where_clauses.append(
                     "(e.scope_mode = 'public' OR e.origin_target = ?)"
@@ -716,9 +704,7 @@ class DatabaseService:
                 where_clauses.append(search_clause)
                 params.extend([search_pattern, search_pattern, search_pattern])
                 category_count_where_clauses.append(search_clause)
-                category_count_params.extend(
-                    [search_pattern, search_pattern, search_pattern]
-                )
+                category_count_params.extend([search_pattern, search_pattern, search_pattern])
 
             where_sql = ""
             if where_clauses:
@@ -726,9 +712,7 @@ class DatabaseService:
 
             category_count_where_sql = ""
             if category_count_where_clauses:
-                category_count_where_sql = (
-                    "WHERE " + " AND ".join(category_count_where_clauses)
-                )
+                category_count_where_sql = "WHERE " + " AND ".join(category_count_where_clauses)
 
             # 计算总数
             count_sql = f"SELECT COUNT(*) as cnt FROM emoji e {where_sql}"
